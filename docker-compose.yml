@@ -52,6 +52,7 @@ services:
     environment:
       - DOCLING_SERVE_HOST=0.0.0.0
       - DOCLING_SERVE_PORT=5001
+      - DOCLING_SERVE_MAX_SYNC_WAIT=300
     restart: unless-stopped
 
   langflow:

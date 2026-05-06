@@ -52,6 +52,7 @@ services:
     environment:
       - DOCLING_SERVE_HOST=0.0.0.0
       - DOCLING_SERVE_PORT=5001
+      - DOCLING_SERVE_MAX_SYNC_WAIT=300
     restart: unless-stopped
 
   langflow:
@@ -60,6 +61,8 @@ services:
     depends_on:
       opensearch:
         condition: service_healthy
+      docling:
+        condition: service_started
     ports:
       - "${LANGFLOW_PORT:-7860}:7860"
     volumes:
@@ -107,8 +110,6 @@ services:
       - SELECTED_EMBEDDING_MODEL=${SELECTED_EMBEDDING_MODEL:-text-embedding-3-small}
       - LANGFLOW_VARIABLES_TO_GET_FROM_ENVIRONMENT=JWT,OPENRAG-QUERY-FILTER,OPENSEARCH_PASSWORD,OPENSEARCH_URL,DOCLING_SERVE_URL,OWNER,OWNER_NAME,OWNER_EMAIL,CONNECTOR_TYPE,DOCUMENT_ID,SOURCE_URL,ALLOWED_USERS,ALLOWED_GROUPS,FILENAME,MIMETYPE,FILESIZE,SELECTED_EMBEDDING_MODEL,OPENAI_API_KEY,ANTHROPIC_API_KEY,WATSONX_APIKEY,WATSONX_URL,WATSONX_PROJECT_ID,OLLAMA_BASE_URL,OPENSEARCH_INDEX_NAME
       - HIDE_GETTING_STARTED_PROGRESS=true
-    depends_on:
-      - docling
 
   openrag-backend:
     # Custom build patches the base image to talk to OpenSearch over plain

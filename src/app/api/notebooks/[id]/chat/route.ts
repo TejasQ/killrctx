@@ -4,13 +4,17 @@
 //
 // _Basically_, the chat panel POSTs `{ content }` here. We:
 //   1. Save the user turn so the UI re-renders it immediately on next refresh.
-//   2. Look up the last assistant `response_id` so OpenRAG can thread the
+//   2. If this is the first message in the conversation, rename it to the
+//      first 50 chars of the user's raw content — so our switcher title
+//      matches what OpenRAG shows on their side (OpenRAG titles threads from
+//      the first message it receives; ours should agree).
+//   3. Look up the last assistant `response_id` so OpenRAG can thread the
 //      conversation (no need to resend the full history).
-//   3. Frame the user's prompt with a "use the retrieval tool first"
+//   4. Frame the user's prompt with a "use the retrieval tool first"
 //      instruction (see below for *why* — this is the trick that makes
 //      "explain" actually search the documents).
-//   4. Call OpenRAG, save the assistant turn with its response_id, return
-//      the answer.
+//   5. Call OpenRAG, save the assistant turn with its response_id, return
+//      the answer (plus the updated conversation title if it changed).
 //
 // The framing trick deserves its own paragraph:
 //   OpenRAG's agent has an internal system prompt with rules like "use
@@ -78,6 +82,26 @@ export async function POST(
     "INSERT INTO messages (id, notebook_id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(uuid(), id, conversationId, "user", content, Date.now());
 
+  // If this is the first message in the conversation, rename it from the
+  // auto-generated "Conversation N" to the first 50 chars of the user's raw
+  // content. We check for exactly 1 message (the one we just inserted).
+  // `updatedTitle` is returned to the client so the switcher updates live.
+  const msgCount = (
+    db
+      .prepare("SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?")
+      .get(conversationId) as { n: number }
+  ).n;
+  let updatedTitle: string | null = null;
+  if (msgCount === 1) {
+    const raw = content.trim();
+    const titleFromContent = raw.length > 50 ? raw.slice(0, 47) + "…" : raw;
+    db.prepare("UPDATE conversations SET title = ? WHERE id = ?").run(
+      titleFromContent,
+      conversationId,
+    );
+    updatedTitle = titleFromContent;
+  }
+
   // The "force retrieval" framing — see file header for the why. We only
   // wrap when there's actually something to retrieve; for an empty notebook
   // we send the prompt as-is so the agent can have a normal conversation
@@ -115,5 +139,7 @@ export async function POST(
     "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   ).run(uuid(), id, conversationId, "assistant", answer, responseId, Date.now());
 
-  return NextResponse.json({ answer });
+  // Include the updated title only on the first message — the client uses it
+  // to refresh the conversation switcher label without a full refresh.
+  return NextResponse.json({ answer, ...(updatedTitle ? { conversationTitle: updatedTitle } : {}) });
 }

@@ -159,6 +159,11 @@ export default function NotebookPage({
               });
             }
           }}
+          onConvRenamed={(convId, title) =>
+            setConversations((cs) =>
+              cs.map((c) => (c.id === convId ? { ...c, title } : c)),
+            )
+          }
         />
         <StudioPanel notebookId={id} podcasts={podcasts} onCreated={refresh} onDeleted={refresh} />
       </div>
@@ -365,6 +370,7 @@ function ChatPanel({
   onConvChange,
   onConvCreated,
   onConvDeleted,
+  onConvRenamed,
 }: {
   notebookId: string;
   messages: Message[];
@@ -374,6 +380,7 @@ function ChatPanel({
   onConvChange: (id: string) => void;
   onConvCreated: (conv: Conversation) => void;
   onConvDeleted: (deletedId: string, replacement?: Conversation) => void;
+  onConvRenamed: (convId: string, title: string) => void;
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -403,6 +410,12 @@ function ChatPanel({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? `chat failed (${res.status})`);
+      }
+      const data = await res.json();
+      // On the first message the server renames the conversation to match
+      // what OpenRAG will show — update the switcher label immediately.
+      if (data.conversationTitle && activeConvId) {
+        onConvRenamed(activeConvId, data.conversationTitle);
       }
       setInput("");
       onSent();

@@ -15,7 +15,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Spinner from "@/components/Spinner";
 import MenuButton from "@/components/MenuButton";
@@ -26,6 +26,8 @@ export default function Home() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  // id of the notebook currently being renamed, or null if none
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   // Fetch the list on mount. We do an optimistic prepend on create (below)
   // so we don't need to refetch after — but if you ever add deletion or
@@ -67,6 +69,19 @@ export default function Home() {
     await fetch(`/api/notebooks/${nb.id}`, { method: "DELETE" });
   }
 
+  async function rename(nb: Notebook, newTitle: string) {
+    const trimmed = newTitle.trim();
+    setRenamingId(null);
+    if (!trimmed || trimmed === nb.title) return;
+    // Optimistic update — swap the title in local state immediately.
+    setNotebooks((n) => n.map((x) => (x.id === nb.id ? { ...x, title: trimmed } : x)));
+    await fetch(`/api/notebooks/${nb.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: trimmed }),
+    });
+  }
+
   return (
     <main className="mx-auto max-w-4xl px-6 py-12">
       <header className="mb-10">
@@ -96,28 +111,44 @@ export default function Home() {
         {notebooks.map((nb) => (
           <li
             key={nb.id}
-            className="group relative rounded-lg border border-edge bg-panel transition hover:border-accent"
+            className="group relative rounded-lg border border-edge bg-panel transition hover:z-10 hover:border-accent"
           >
-            <Link
-              href={`/notebooks/${nb.id}`}
-              className="block px-4 py-3 pr-12"
-            >
-              <div className="text-sm font-medium">{nb.title}</div>
-              <div className="text-xs text-muted">
-                {new Date(nb.created_at).toLocaleString()}
-              </div>
-            </Link>
-            <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition group-hover:opacity-100">
-              <MenuButton
-                actions={[
-                  {
-                    label: "Delete notebook",
-                    variant: "danger",
-                    onClick: () => remove(nb),
-                  },
-                ]}
+            {renamingId === nb.id ? (
+              // Rename mode: full-card inline input, same height as the card.
+              // Clicking away (onBlur) or pressing Enter commits; Escape cancels.
+              <RenameInput
+                defaultValue={nb.title}
+                onCommit={(v) => rename(nb, v)}
+                onCancel={() => setRenamingId(null)}
               />
-            </div>
+            ) : (
+              <Link
+                href={`/notebooks/${nb.id}`}
+                className="block px-4 py-3 pr-12"
+              >
+                <div className="text-sm font-medium">{nb.title}</div>
+                <div className="text-xs text-muted">
+                  {new Date(nb.created_at).toLocaleString()}
+                </div>
+              </Link>
+            )}
+            {renamingId !== nb.id && (
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition group-hover:opacity-100">
+                <MenuButton
+                  actions={[
+                    {
+                      label: "Rename",
+                      onClick: () => setRenamingId(nb.id),
+                    },
+                    {
+                      label: "Delete notebook",
+                      variant: "danger",
+                      onClick: () => remove(nb),
+                    },
+                  ]}
+                />
+              </div>
+            )}
           </li>
         ))}
         {notebooks.length === 0 && (
@@ -127,5 +158,47 @@ export default function Home() {
         )}
       </ul>
     </main>
+  );
+}
+
+// ============================================================================
+// RenameInput — inline text field that replaces a notebook card's title row
+// ============================================================================
+// Rendered in place of the <Link> when a card enters rename mode. autoFocus
+// lands the cursor immediately. Enter/blur commits; Escape cancels.
+// ============================================================================
+function RenameInput({
+  defaultValue,
+  onCommit,
+  onCancel,
+}: {
+  defaultValue: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(defaultValue);
+  const committed = useRef(false);
+
+  function commit() {
+    if (committed.current) return;
+    committed.current = true;
+    onCommit(value);
+  }
+
+  return (
+    <div className="px-4 py-3 pr-12">
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+        }}
+        className="w-full rounded border border-accent bg-transparent text-sm font-medium outline-none"
+      />
+      <div className="mt-0.5 text-xs text-muted">Enter to save · Esc to cancel</div>
+    </div>
   );
 }

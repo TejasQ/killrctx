@@ -40,7 +40,8 @@ import MenuButton from "@/components/MenuButton";
 // in lib/db.ts but only include fields the client actually uses.
 type Notebook = { id: string; title: string; openrag_collection: string };
 type Document = { id: string; filename: string; bytes: number };
-type Message = { id: string; role: "user" | "assistant"; content: string };
+type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
+type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string };
 type Podcast = {
   id: string;
   title: string;
@@ -60,18 +61,24 @@ export default function NotebookPage({
   const { id } = use(params);
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [podcasts, setPodcasts] = useState<Podcast[]>([]);
 
-  // One fetch, four state updates. Called on mount and after every mutating
+  // One fetch, five state updates. Called on mount and after every mutating
   // action (upload, chat send, podcast create, source delete). The bundle
-  // endpoint means we don't have a waterfall of four parallel fetches.
+  // endpoint means we don't have a waterfall of parallel fetches.
   async function refresh() {
     const res = await fetch(`/api/notebooks/${id}`);
     if (!res.ok) return;
     const data = await res.json();
     setNotebook(data.notebook);
     setDocuments(data.documents);
+    setConversations(data.conversations ?? []);
+    // On first load (activeConvId is null), default to the first conversation.
+    // On subsequent refreshes, keep whatever the user already selected.
+    setActiveConvId((prev) => prev ?? data.conversations?.[0]?.id ?? null);
     setMessages(data.messages);
     setPodcasts(data.podcasts);
   }
@@ -103,7 +110,20 @@ export default function NotebookPage({
           <Link href="/" className="text-sm text-muted hover:text-white">
             ← Notebooks
           </Link>
-          <h1 className="text-base font-medium">{notebook.title}</h1>
+          <InlineTitle
+            title={notebook.title}
+            onSave={async (newTitle) => {
+              const res = await fetch(`/api/notebooks/${id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: newTitle }),
+              });
+              if (res.ok) {
+                const { notebook: updated } = await res.json();
+                setNotebook(updated);
+              }
+            }}
+          />
         </div>
         <div className="text-xs text-muted">collection: {notebook.openrag_collection}</div>
       </header>
@@ -114,8 +134,34 @@ export default function NotebookPage({
           documents={documents}
           onUploaded={refresh}
         />
-        <ChatPanel notebookId={id} messages={messages} onSent={refresh} />
-        <StudioPanel notebookId={id} podcasts={podcasts} onCreated={refresh} />
+        <ChatPanel
+          notebookId={id}
+          messages={messages}
+          conversations={conversations}
+          activeConvId={activeConvId}
+          onSent={refresh}
+          onConvChange={setActiveConvId}
+          onConvCreated={(conv) => {
+            setConversations((cs) => [...cs, conv]);
+            setActiveConvId(conv.id);
+          }}
+          onConvDeleted={(deletedId, replacement) => {
+            if (replacement) {
+              setConversations((cs) =>
+                cs.map((c) => (c.id === deletedId ? replacement : c)),
+              );
+              setActiveConvId(replacement.id);
+            } else {
+              setConversations((cs) => cs.filter((c) => c.id !== deletedId));
+              setActiveConvId((prev) => {
+                if (prev !== deletedId) return prev;
+                // Switch to the first remaining conversation.
+                return conversations.find((c) => c.id !== deletedId)?.id ?? null;
+              });
+            }
+          }}
+        />
+        <StudioPanel notebookId={id} podcasts={podcasts} onCreated={refresh} onDeleted={refresh} />
       </div>
     </div>
   );
@@ -126,7 +172,8 @@ export default function NotebookPage({
 // ============================================================================
 // The user adds files here. Multi-select is enabled (`multiple` on the file
 // input); we upload them sequentially so OpenRAG/Docling never sees a stampede.
-// Hover a row to reveal the 3-dot menu for per-source delete.
+// Hover a row to reveal the 3-dot menu for per-source delete, or use the
+// checkboxes + bulk-delete bar to remove multiple sources at once.
 // ============================================================================
 function SourcesPanel({
   notebookId,
@@ -140,6 +187,8 @@ function SourcesPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
   // Upload files sequentially. The API route accepts one `file` per
   // request, so we loop here rather than batching multipart on the server.
@@ -186,6 +235,34 @@ function SourcesPanel({
     onUploaded(); // re-uses the parent's refresh function
   }
 
+  async function bulkDelete() {
+    if (selected.size === 0) return;
+    if (!confirm(`Delete ${selected.size} source${selected.size > 1 ? "s" : ""}? This removes their chunks from the index.`))
+      return;
+    setDeleting(true);
+    try {
+      for (const docId of selected) {
+        await fetch(`/api/notebooks/${notebookId}/documents/${docId}`, {
+          method: "DELETE",
+        });
+      }
+    } finally {
+      setSelected(new Set());
+      setDeleting(false);
+      onUploaded();
+    }
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = documents.length > 0 && selected.size === documents.length;
+
   return (
     <aside className="flex min-h-0 flex-col border-r border-edge bg-panel">
       <div className="border-b border-edge px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted">
@@ -202,15 +279,24 @@ function SourcesPanel({
             {documents.map((d) => (
               <li
                 key={d.id}
-                className="group flex items-start gap-2 rounded-md border border-edge px-3 py-2 text-sm"
+                className="group flex items-center gap-2 rounded-md border border-edge px-3 py-2 text-sm"
               >
+                {/* Checkbox: always rendered; opacity trick keeps layout stable */}
+                <input
+                  type="checkbox"
+                  checked={selected.has(d.id)}
+                  onChange={() => toggleSelect(d.id)}
+                  className={`h-3.5 w-3.5 flex-shrink-0 accent-accent transition ${
+                    selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  }`}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{d.filename}</div>
                   <div className="text-xs text-muted">
                     {(d.bytes / 1024).toFixed(1)} KB
                   </div>
                 </div>
-                <div className="opacity-0 transition group-hover:opacity-100">
+                <div className={`transition ${selected.size > 0 ? "opacity-0" : "opacity-0 group-hover:opacity-100"}`}>
                   <MenuButton
                     actions={[
                       {
@@ -231,6 +317,29 @@ function SourcesPanel({
           </p>
         )}
       </div>
+
+      {/* Bulk-delete bar — only visible when ≥1 source is selected */}
+      {selected.size > 0 && (
+        <div className="flex items-center gap-2 border-t border-edge px-3 py-2">
+          <button
+            onClick={() =>
+              setSelected(allSelected ? new Set() : new Set(documents.map((d) => d.id)))
+            }
+            className="text-xs text-muted hover:text-white"
+          >
+            {allSelected ? "Deselect all" : "Select all"}
+          </button>
+          <button
+            onClick={bulkDelete}
+            disabled={deleting}
+            className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
+          >
+            {deleting && <Spinner size="xs" />}
+            Delete selected ({selected.size})
+          </button>
+        </div>
+      )}
+
       <div className="border-t border-edge p-3">
         <input
           ref={inputRef}
@@ -262,42 +371,54 @@ function SourcesPanel({
 // ============================================================================
 // ChatPanel — middle column
 // ============================================================================
-// The conversation. New user messages get persisted optimistically by the
-// server-side route, so the UI just calls `onSent()` (which re-fetches the
-// bundle) after a successful POST. The agent's reply lands in the same
-// re-fetch. Auto-scrolls to the bottom on every messages-array change.
+// The conversation. A header bar lets the user pick a prior conversation or
+// start a new one. Only messages belonging to the active conversation are
+// shown — all messages are fetched together in the bundle and filtered here.
+// Auto-scrolls to the bottom on every visible-messages change.
 // ============================================================================
 function ChatPanel({
   notebookId,
   messages,
+  conversations,
+  activeConvId,
   onSent,
+  onConvChange,
+  onConvCreated,
+  onConvDeleted,
 }: {
   notebookId: string;
   messages: Message[];
+  conversations: Conversation[];
+  activeConvId: string | null;
   onSent: () => void;
+  onConvChange: (id: string) => void;
+  onConvCreated: (conv: Conversation) => void;
+  onConvDeleted: (deletedId: string, replacement?: Conversation) => void;
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [creatingConv, setCreatingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll the message list to the bottom whenever a new turn lands.
-  // Runs on the next paint thanks to useEffect, so the new <li> is in the
-  // DOM by the time we measure scrollHeight.
+  // Only show messages for the active conversation.
+  const visibleMessages = messages.filter((m) => m.conversation_id === activeConvId);
+
+  // Auto-scroll to the bottom whenever the visible message list changes.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages]);
+  }, [visibleMessages]);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || !activeConvId) return;
     setSending(true);
     setError(null);
     try {
       const res = await fetch(`/api/notebooks/${notebookId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: input }),
+        body: JSON.stringify({ content: input, conversationId: activeConvId }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -312,17 +433,81 @@ function ChatPanel({
     }
   }
 
+  async function newConversation() {
+    setCreatingConv(true);
+    try {
+      const res = await fetch(`/api/notebooks/${notebookId}/conversations`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        const { conversation } = await res.json();
+        onConvCreated(conversation);
+      }
+    } finally {
+      setCreatingConv(false);
+    }
+  }
+
+  async function deleteConversation() {
+    if (!activeConvId) return;
+    const activeConv = conversations.find((c) => c.id === activeConvId);
+    if (!confirm(`Delete "${activeConv?.title ?? "this conversation"}"? Its messages will be removed.`))
+      return;
+    const res = await fetch(
+      `/api/notebooks/${notebookId}/conversations/${activeConvId}`,
+      { method: "DELETE" },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      // If this was the last conversation the API returns a replacement row.
+      onConvDeleted(activeConvId, data.conversation ?? undefined);
+    }
+  }
+
   return (
     <section className="flex min-h-0 flex-col bg-ink">
+      {/* Conversation switcher header */}
+      <div className="flex items-center gap-2 border-b border-edge bg-panel px-4 py-2">
+        <select
+          value={activeConvId ?? ""}
+          onChange={(e) => onConvChange(e.target.value)}
+          className="flex-1 truncate rounded border border-edge bg-ink px-2 py-1 text-sm outline-none focus:border-accent"
+        >
+          {conversations.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.title}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={newConversation}
+          disabled={creatingConv}
+          title="New conversation"
+          className="flex items-center gap-1 rounded px-2 py-1 text-xs text-muted hover:bg-edge hover:text-white disabled:opacity-50"
+        >
+          {creatingConv ? <Spinner size="xs" /> : "+"}
+          New
+        </button>
+        <button
+          onClick={deleteConversation}
+          title="Delete this conversation"
+          className="rounded px-2 py-1 text-xs text-muted hover:bg-red-950/40 hover:text-red-300"
+        >
+          Delete
+        </button>
+      </div>
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
-        {messages.length === 0 && !sending ? (
+        {visibleMessages.length === 0 && !sending ? (
           <div className="mx-auto max-w-lg pt-20 text-center text-sm text-muted">
             Add sources, then ask a question. Answers come from OpenRAG retrieval over
             your indexed documents.
           </div>
         ) : (
           <ul className="mx-auto max-w-2xl space-y-5">
-            {messages.map((m) => (
+            {visibleMessages.map((m) => (
               <li key={m.id} className="text-sm leading-relaxed">
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
                   {m.role === "user" ? "You" : "Notebook"}
@@ -355,7 +540,7 @@ function ChatPanel({
             className="flex-1 rounded-lg border border-edge bg-ink px-3 py-2 text-sm outline-none focus:border-accent"
           />
           <button
-            disabled={sending || !input.trim()}
+            disabled={sending || !input.trim() || !activeConvId}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {sending && <Spinner size="sm" />}
@@ -370,23 +555,25 @@ function ChatPanel({
 // ============================================================================
 // StudioPanel — right column
 // ============================================================================
-// "Generate podcast" form + the list of episodes (in any state). The POST
-// returns immediately with status: "scripting" — actual generation runs in
-// the background on the server. The parent component polls every 3s while
-// any podcast is non-terminal, so cards transition through their states
-// without us having to do anything special here.
+// "Generate podcast" form + the list of episodes (in any state). Podcast
+// cards have checkboxes for bulk-delete; the bulk-delete bar appears at the
+// bottom whenever ≥1 card is selected.
 // ============================================================================
 function StudioPanel({
   notebookId,
   podcasts,
   onCreated,
+  onDeleted,
 }: {
   notebookId: string;
   podcasts: Podcast[];
   onCreated: () => void;
+  onDeleted: () => void;
 }) {
   const [topic, setTopic] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
   async function generate() {
     setGenerating(true);
@@ -405,6 +592,34 @@ function StudioPanel({
       setGenerating(false);
     }
   }
+
+  async function bulkDelete() {
+    if (selected.size === 0) return;
+    if (!confirm(`Delete ${selected.size} episode${selected.size > 1 ? "s" : ""}?`))
+      return;
+    setDeleting(true);
+    try {
+      for (const podcastId of selected) {
+        await fetch(`/api/notebooks/${notebookId}/podcasts/${podcastId}`, {
+          method: "DELETE",
+        });
+      }
+    } finally {
+      setSelected(new Set());
+      setDeleting(false);
+      onDeleted();
+    }
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = podcasts.length > 0 && selected.size === podcasts.length;
 
   return (
     <aside className="flex min-h-0 flex-col border-l border-edge bg-panel">
@@ -436,13 +651,40 @@ function StudioPanel({
 
         <div className="mt-5 space-y-3">
           {podcasts.map((p) => (
-            <PodcastCard key={p.id} podcast={p} />
+            <PodcastCard
+              key={p.id}
+              podcast={p}
+              checked={selected.has(p.id)}
+              onToggle={() => toggleSelect(p.id)}
+            />
           ))}
           {podcasts.length === 0 && (
             <p className="text-xs text-muted">No episodes yet.</p>
           )}
         </div>
       </div>
+
+      {/* Bulk-delete bar — only visible when ≥1 episode is selected */}
+      {selected.size > 0 && (
+        <div className="flex items-center gap-2 border-t border-edge px-3 py-2">
+          <button
+            onClick={() =>
+              setSelected(allSelected ? new Set() : new Set(podcasts.map((p) => p.id)))
+            }
+            className="text-xs text-muted hover:text-white"
+          >
+            {allSelected ? "Deselect all" : "Select all"}
+          </button>
+          <button
+            onClick={bulkDelete}
+            disabled={deleting}
+            className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
+          >
+            {deleting && <Spinner size="xs" />}
+            Delete selected ({selected.size})
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
@@ -454,13 +696,30 @@ function StudioPanel({
 // title + status pill), ready (audio player), failed (error text). The
 // script toggle is independent — it's available as soon as scripting
 // finishes, which gives you something to read while synthesis runs.
+// `checked` / `onToggle` wire the card into the StudioPanel bulk-select.
 // ============================================================================
-function PodcastCard({ podcast }: { podcast: Podcast }) {
+function PodcastCard({
+  podcast,
+  checked,
+  onToggle,
+}: {
+  podcast: Podcast;
+  checked: boolean;
+  onToggle: () => void;
+}) {
   const [showScript, setShowScript] = useState(false);
   return (
-    <div className="rounded-lg border border-edge p-3">
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-medium">{podcast.title}</div>
+    <div className="group rounded-lg border border-edge p-3">
+      <div className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className={`h-3.5 w-3.5 flex-shrink-0 accent-accent transition ${
+            checked ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+          }`}
+        />
+        <div className="min-w-0 flex-1 text-sm font-medium truncate">{podcast.title}</div>
         <StatusPill status={podcast.status} />
       </div>
       {podcast.status === "ready" && podcast.audio_url && (
@@ -514,3 +773,74 @@ function StatusPill({ status }: { status: Podcast["status"] }) {
     </span>
   );
 }
+
+// ============================================================================
+// InlineTitle — click-to-edit notebook title in the page header
+// ============================================================================
+// Renders as plain text normally. Clicking it swaps in an <input> pre-filled
+// with the current value. Enter or blur saves; Escape reverts. An empty or
+// whitespace-only title is rejected and the previous value is restored.
+// ============================================================================
+function InlineTitle({
+  title,
+  onSave,
+}: {
+  title: string;
+  onSave: (newTitle: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+
+  // Keep draft in sync if the parent title changes (e.g. after a refresh).
+  // Only update when not currently editing so we don't clobber the user's input.
+  if (!editing && draft !== title) setDraft(title);
+
+  function startEdit() {
+    setDraft(title);
+    setEditing(true);
+  }
+
+  async function commit() {
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      // Reject empty — revert to original without calling the API.
+      setDraft(title);
+      setEditing(false);
+      return;
+    }
+    setEditing(false);
+    await onSave(trimmed);
+  }
+
+  function cancel() {
+    setDraft(title);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") cancel();
+        }}
+        className="rounded border border-accent bg-transparent px-1 text-base font-medium outline-none"
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={startEdit}
+      title="Click to rename"
+      className="rounded px-1 text-base font-medium hover:bg-edge"
+    >
+      {title}
+    </button>
+  );
+}
+

@@ -20,20 +20,20 @@
 //   what the codebase uses everywhere.
 //
 // Schema overview (one notebook -> many of everything else):
-//   notebooks   user-created notebook (one row per notebook in the UI)
-//   documents   files the user uploaded; we cache filename/size for the UI
-//               and the OpenRAG task ID for debugging. The actual chunks
-//               live in OpenSearch.
-//   messages    user/assistant turns. `response_id` is OpenRAG's reply ID,
-//               which we feed back as `previous_response_id` to thread
-//               conversations.
-//   podcasts    per-episode row. `status` walks pending → scripting →
-//               synthesizing → ready/failed; the UI polls until it's one
-//               of the terminal states.
+//   notebooks      user-created notebook (one row per notebook in the UI)
+//   documents      files the user uploaded; we cache filename/size for the UI
+//                  and the OpenRAG task ID for debugging. The actual chunks
+//                  live in OpenSearch.
+//   conversations  named chat threads within a notebook. A notebook starts
+//                  with one default conversation; the user can create more.
+//   messages       user/assistant turns, scoped to a conversation.
+//                  `response_id` is OpenRAG's reply ID for threading.
+//   podcasts       per-episode row. `status` walks pending → scripting →
+//                  synthesizing → ready/failed; the UI polls until it's one
+//                  of the terminal states.
 //
 // Foreign keys all cascade on delete so removing a notebook cleans up
-// everything. We don't currently expose a "delete notebook" UI but the
-// schema is ready when we do.
+// everything owned by it.
 // ============================================================================
 
 import Database from "better-sqlite3";
@@ -62,9 +62,17 @@ export type Document = {
 export type Message = {
   id: string;
   notebook_id: string;
+  conversation_id: string | null; // null only for legacy rows before the migration
   role: "user" | "assistant";
   content: string;
   response_id: string | null; // OpenRAG response ID — chains turns into a thread
+  created_at: number;
+};
+
+export type Conversation = {
+  id: string;
+  notebook_id: string;
+  title: string;
   created_at: number;
 };
 
@@ -103,10 +111,9 @@ function getDb(): Database.Database {
   const conn = new Database(join(dataDir, "killrctx.db"));
   conn.pragma("journal_mode = WAL");
 
-  // Forward-compat micro-migration: an early version of this app shipped
-  // without `response_id` on messages. Rather than ship a real migration
-  // framework, we sniff PRAGMA table_info and ALTER if the column is
-  // missing. Cheap and good enough for a single-user demo app.
+  // Forward-compat micro-migrations. We sniff PRAGMA table_info and ALTER
+  // only if a column is missing, which is idempotent across restarts.
+  // Cheap and good enough for a single-user demo app.
   conn.exec(
     `CREATE TABLE IF NOT EXISTS messages_migrate_marker (x INTEGER);`,
   );
@@ -117,9 +124,14 @@ function getDb(): Database.Database {
     if (cols.length > 0 && !cols.some((c) => c.name === "response_id")) {
       conn.exec("ALTER TABLE messages ADD COLUMN response_id TEXT");
     }
+    // Add conversation_id to messages. Existing rows get NULL here; the
+    // back-fill block below assigns them to a default conversation per notebook.
+    if (cols.length > 0 && !cols.some((c) => c.name === "conversation_id")) {
+      conn.exec("ALTER TABLE messages ADD COLUMN conversation_id TEXT");
+    }
   } catch {
     // Table doesn't exist yet — the CREATE TABLE below will create it with
-    // the column already in place, so nothing to migrate.
+    // all columns already in place, so nothing to migrate.
   }
 
   // Schema. `IF NOT EXISTS` makes this idempotent; we run it on every boot.
@@ -129,6 +141,13 @@ function getDb(): Database.Database {
       title TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       openrag_collection TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS conversations (
+      id          TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL,
+      title       TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
@@ -140,12 +159,13 @@ function getDb(): Database.Database {
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      notebook_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      response_id TEXT,
-      created_at INTEGER NOT NULL,
+      id              TEXT PRIMARY KEY,
+      notebook_id     TEXT NOT NULL,
+      conversation_id TEXT,
+      role            TEXT NOT NULL,
+      content         TEXT NOT NULL,
+      response_id     TEXT,
+      created_at      INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS podcasts (
@@ -160,6 +180,30 @@ function getDb(): Database.Database {
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
   `);
+
+  // Back-fill: for each notebook that has messages with no conversation_id,
+  // create one default "Conversation 1" row and assign all its messages to it.
+  // This runs on every boot but is a no-op once all rows have a conversation_id.
+  const orphanedNotebooks = conn
+    .prepare(
+      `SELECT DISTINCT notebook_id FROM messages WHERE conversation_id IS NULL`,
+    )
+    .all() as { notebook_id: string }[];
+
+  for (const { notebook_id } of orphanedNotebooks) {
+    const defaultId = `conv_default_${notebook_id.replace(/-/g, "")}`;
+    conn
+      .prepare(
+        `INSERT OR IGNORE INTO conversations (id, notebook_id, title, created_at)
+         VALUES (?, ?, 'Conversation 1', ?)`,
+      )
+      .run(defaultId, notebook_id, Date.now());
+    conn
+      .prepare(
+        `UPDATE messages SET conversation_id = ? WHERE notebook_id = ? AND conversation_id IS NULL`,
+      )
+      .run(defaultId, notebook_id);
+  }
 
   _db = conn;
   return conn;

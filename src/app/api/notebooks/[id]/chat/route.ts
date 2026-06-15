@@ -32,7 +32,7 @@ export const runtime = "nodejs";
 
 /**
  * POST /api/notebooks/[id]/chat
- * Body: { content: string }
+ * Body: { content: string; conversationId: string }
  * Response: { answer: string } | { error: string } (502 on backend failure)
  */
 export async function POST(
@@ -40,9 +40,15 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { content } = (await req.json()) as { content?: string };
+  const { content, conversationId } = (await req.json()) as {
+    content?: string;
+    conversationId?: string;
+  };
   if (!content?.trim()) {
     return NextResponse.json({ error: "empty" }, { status: 400 });
+  }
+  if (!conversationId?.trim()) {
+    return NextResponse.json({ error: "conversationId is required" }, { status: 400 });
   }
 
   const notebook = db
@@ -52,22 +58,25 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Find the most recent assistant turn with a response_id; that's what we
-  // hand back to OpenRAG so it can pick up where the conversation left off.
-  // If there's no prior assistant turn yet, this is the first message and
-  // we send `previousResponseId: null`.
+  // Find the most recent assistant turn *in this conversation* with a
+  // response_id — that's what we hand to OpenRAG to continue the thread.
+  // Scoping to conversation_id means two conversations in the same notebook
+  // each have independent OpenRAG threading.
   const lastAssistant = db
     .prepare(
-      "SELECT response_id FROM messages WHERE notebook_id = ? AND role = 'assistant' AND response_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      `SELECT response_id FROM messages
+       WHERE notebook_id = ? AND conversation_id = ?
+         AND role = 'assistant' AND response_id IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(id) as Pick<Message, "response_id"> | undefined;
+    .get(id, conversationId) as Pick<Message, "response_id"> | undefined;
 
   // Persist the user turn first so even if the OpenRAG call fails, the user
   // sees their own message in the transcript. (We could move this after the
   // success-path to keep transcripts "clean", but feedback wins.)
   db.prepare(
-    "INSERT INTO messages (id, notebook_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(uuid(), id, "user", content, Date.now());
+    "INSERT INTO messages (id, notebook_id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(uuid(), id, conversationId, "user", content, Date.now());
 
   // The "force retrieval" framing — see file header for the why. We only
   // wrap when there's actually something to retrieve; for an empty notebook
@@ -103,8 +112,8 @@ export async function POST(
   }
 
   db.prepare(
-    "INSERT INTO messages (id, notebook_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(uuid(), id, "assistant", answer, responseId, Date.now());
+    "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(uuid(), id, conversationId, "assistant", answer, responseId, Date.now());
 
   return NextResponse.json({ answer });
 }

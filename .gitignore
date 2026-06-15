@@ -42,3 +42,7 @@ config/
 .DS_Store
 Thumbs.db
 .bob/
+
+# local claude code config
+.claude/
+CLAUDE.md

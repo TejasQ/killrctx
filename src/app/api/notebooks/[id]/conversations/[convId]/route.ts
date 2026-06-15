@@ -3,9 +3,14 @@
 // ============================================================================
 //
 // _Basically_, the delete button in the conversation switcher calls DELETE
-// here. We remove the conversation's messages first, then the conversation
-// row itself (SQLite doesn't cascade from conversations → messages because
-// messages are still foreign-keyed to notebooks, not conversations).
+// here. We:
+//   1. Look up the last assistant response_id for this conversation — that is
+//      the OpenRAG chatId we need to clean up on their side.
+//   2. Delete the conversation's messages from SQLite, then the conversation
+//      row itself (no cascade because messages FK to notebooks, not convs).
+//   3. Tell OpenRAG to drop the thread via client.chat.delete(chatId).
+//      Best-effort — we swallow errors so SQLite is always cleaned up even
+//      if OpenRAG is unreachable.
 //
 // Last-conversation special case:
 //   A notebook must always have at least one conversation — otherwise the
@@ -22,7 +27,8 @@
 
 import { NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
-import db, { Conversation } from "@/lib/db";
+import db, { Conversation, Message } from "@/lib/db";
+import { deleteConversation as deleteOpenRagConversation } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -39,6 +45,16 @@ export async function DELETE(
   if (!conversation) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+
+  // Grab the last assistant response_id — this is the OpenRAG chatId for the
+  // thread. We read it before deleting messages so it's still available.
+  const lastAssistant = db
+    .prepare(
+      `SELECT response_id FROM messages
+       WHERE conversation_id = ? AND role = 'assistant' AND response_id IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(convId) as Pick<Message, "response_id"> | undefined;
 
   const totalConvs = (
     db
@@ -57,6 +73,15 @@ export async function DELETE(
       "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, 'Conversation 1', ?)",
     ).run(newId, id, Date.now());
 
+    // Clean up the OpenRAG thread best-effort.
+    if (lastAssistant?.response_id) {
+      try {
+        await deleteOpenRagConversation(lastAssistant.response_id);
+      } catch {
+        // OpenRAG unreachable or thread already gone — not a hard failure.
+      }
+    }
+
     const replacement = db
       .prepare("SELECT * FROM conversations WHERE id = ?")
       .get(newId) as Conversation;
@@ -66,5 +91,15 @@ export async function DELETE(
   // Normal delete: remove the messages then the conversation row.
   db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(convId);
   db.prepare("DELETE FROM conversations WHERE id = ?").run(convId);
+
+  // Clean up the OpenRAG thread best-effort.
+  if (lastAssistant?.response_id) {
+    try {
+      await deleteOpenRagConversation(lastAssistant.response_id);
+    } catch {
+      // OpenRAG unreachable or thread already gone — not a hard failure.
+    }
+  }
+
   return NextResponse.json({ ok: true });
 }

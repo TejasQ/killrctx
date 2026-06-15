@@ -34,7 +34,6 @@
 import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Spinner from "@/components/Spinner";
-import MenuButton from "@/components/MenuButton";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
@@ -172,8 +171,7 @@ export default function NotebookPage({
 // ============================================================================
 // The user adds files here. Multi-select is enabled (`multiple` on the file
 // input); we upload them sequentially so OpenRAG/Docling never sees a stampede.
-// Hover a row to reveal the 3-dot menu for per-source delete, or use the
-// checkboxes + bulk-delete bar to remove multiple sources at once.
+// Hover a row to reveal its checkbox; check ≥1 to show the bulk-delete bar.
 // ============================================================================
 function SourcesPanel({
   notebookId,
@@ -226,15 +224,6 @@ function SourcesPanel({
     }
   }
 
-  async function remove(d: Document) {
-    if (!confirm(`Remove "${d.filename}"? This deletes its chunks from the index.`))
-      return;
-    await fetch(`/api/notebooks/${notebookId}/documents/${d.id}`, {
-      method: "DELETE",
-    });
-    onUploaded(); // re-uses the parent's refresh function
-  }
-
   async function bulkDelete() {
     if (selected.size === 0) return;
     if (!confirm(`Delete ${selected.size} source${selected.size > 1 ? "s" : ""}? This removes their chunks from the index.`))
@@ -281,31 +270,22 @@ function SourcesPanel({
                 key={d.id}
                 className="group flex items-center gap-2 rounded-md border border-edge px-3 py-2 text-sm"
               >
-                {/* Checkbox: always rendered; opacity trick keeps layout stable */}
+                {/* Checkbox — always in the DOM; fades in on hover or when any
+                    box is already checked so layout never shifts. Styled to
+                    match the dark palette rather than the system native look. */}
                 <input
                   type="checkbox"
                   checked={selected.has(d.id)}
                   onChange={() => toggleSelect(d.id)}
-                  className={`h-3.5 w-3.5 flex-shrink-0 accent-accent transition ${
-                    selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                  }`}
+                  className={`h-3.5 w-3.5 flex-shrink-0 cursor-pointer appearance-none rounded-sm border border-edge bg-edge transition
+                    checked:border-accent checked:bg-accent
+                    ${selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{d.filename}</div>
                   <div className="text-xs text-muted">
                     {(d.bytes / 1024).toFixed(1)} KB
                   </div>
-                </div>
-                <div className={`transition ${selected.size > 0 ? "opacity-0" : "opacity-0 group-hover:opacity-100"}`}>
-                  <MenuButton
-                    actions={[
-                      {
-                        label: "Delete source",
-                        variant: "danger",
-                        onClick: () => remove(d),
-                      },
-                    ]}
-                  />
                 </div>
               </li>
             ))}
@@ -715,9 +695,9 @@ function PodcastCard({
           type="checkbox"
           checked={checked}
           onChange={onToggle}
-          className={`h-3.5 w-3.5 flex-shrink-0 accent-accent transition ${
-            checked ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-          }`}
+          className={`h-3.5 w-3.5 flex-shrink-0 cursor-pointer appearance-none rounded-sm border border-edge bg-edge transition
+            checked:border-accent checked:bg-accent
+            ${checked ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
         />
         <div className="min-w-0 flex-1 text-sm font-medium truncate">{podcast.title}</div>
         <StatusPill status={podcast.status} />

@@ -8,10 +8,11 @@
 // indexes them in OpenSearch, and then chat calls become magic — the backend
 // runs an agent that decides when to call its retrieval tool to ground answers.
 //
-// All communication goes through the official `openrag-sdk` client. Three
+// All communication goes through the official `openrag-sdk` client. Four
 // in-app CRUD operations are covered here:
 //
 //   client.chat.create()        — send a prompt, get a grounded answer
+//   client.chat.delete(chatId)  — remove a conversation thread from OpenRAG
 //   client.documents.ingest()   — push a file through Docling → embed → index
 //   client.documents.delete()   — remove all chunks for a filename
 //
@@ -111,6 +112,21 @@ export async function ingestDocument(args: {
   const file = new File([blob], args.filename, { type: args.contentType });
   const r = await getClient().documents.ingest({ file, filename: args.filename, wait: false });
   return { taskId: (r as IngestResponse).task_id ?? "" };
+}
+
+/**
+ * Remove a conversation thread from OpenRAG by its chatId.
+ *
+ * The `chatId` is what OpenRAG calls the threading token — our SQLite column
+ * stores it as `response_id`. If the conversation never had an assistant reply
+ * there is no chatId to clean up, so callers should pass null/undefined and
+ * this function becomes a no-op.
+ *
+ * Best-effort — callers swallow errors so the SQLite delete always succeeds
+ * even if OpenRAG is unreachable.
+ */
+export async function deleteConversation(chatId: string): Promise<void> {
+  await getClient().chat.delete(chatId);
 }
 
 /**

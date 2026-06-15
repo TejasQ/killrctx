@@ -7,19 +7,18 @@
 // chunks from OpenSearch so the chat agent doesn't keep retrieving from a
 // document the user thinks they removed.
 //
-// The OpenRAG cleanup uses /documents/delete-by-filename — that endpoint
-// removes every chunk whose `filename` field matches. It's an imperfect
-// match (two documents with the same filename in the same notebook would
-// both get nuked), but the upstream backend doesn't expose a per-id delete.
-// Fine for a single-user app.
+// The OpenRAG cleanup uses deleteDocument() from src/lib/openrag.ts, which
+// calls client.documents.delete(filename). It removes every chunk whose
+// `filename` field matches — an imperfect match (two documents with the same
+// filename would both get nuked), but the upstream backend doesn't expose a
+// per-id delete. Fine for a single-user app.
 // ============================================================================
 
 import { NextResponse } from "next/server";
 import db, { Document } from "@/lib/db";
+import { deleteDocument } from "@/lib/openrag";
 
 export const runtime = "nodejs";
-
-const baseUrl = process.env.OPENRAG_URL ?? "http://localhost:8000";
 
 /** DELETE /api/notebooks/[id]/documents/[docId] */
 export async function DELETE(
@@ -41,12 +40,7 @@ export async function DELETE(
   db.prepare("DELETE FROM documents WHERE id = ?").run(docId);
 
   try {
-    await fetch(`${baseUrl}/documents/delete-by-filename`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: doc.filename }),
-      signal: AbortSignal.timeout(15_000),
-    });
+    await deleteDocument(doc.filename);
   } catch {
     // Swallow — the row is already gone from our table; the chunks linger
     // until next OpenRAG restart at worst. Not a hard failure.

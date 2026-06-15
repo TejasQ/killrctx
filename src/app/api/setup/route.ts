@@ -28,7 +28,7 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const baseUrl = process.env.OPENRAG_URL ?? "http://localhost:8000";
+const baseUrl = process.env.OPENRAG_INSTALL_URL ?? "http://localhost:8000";
 
 export async function POST() {
   // Defaults — reasonable for OpenAI free-tier credits. Override via env
@@ -40,6 +40,10 @@ export async function POST() {
     process.env.SELECTED_EMBEDDING_MODEL ?? "text-embedding-3-small";
 
   try {
+    // Not using SDK: /onboarding has no SDK equivalent. It does model
+    // selection + Langflow API-key wiring in a single call — client.settings.update()
+    // hits a different endpoint (/api/v1/settings) and does not cover this.
+    //
     // 120s timeout — /onboarding internally retries Langflow API-key
     // generation up to 15 times with backoff, which can take a while.
     const res = await fetch(`${baseUrl}/onboarding`, {
@@ -54,6 +58,9 @@ export async function POST() {
       signal: AbortSignal.timeout(120_000),
     });
 
+    // Not using SDK: the verify step reads providers[].has_api_key from the
+    // raw /settings response, which the SDK's SettingsResponse does not expose.
+    //
     // Verify by re-reading /settings. The fields we care about are
     // agent.llm_model and knowledge.embedding_model — if both are set,
     // the chat path will work regardless of what /onboarding returned.

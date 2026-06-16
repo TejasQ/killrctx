@@ -29,7 +29,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Podcast } from "@/lib/db";
+import db, { Notebook, Note } from "@/lib/db";
 import { draftScript, parseScript, synthesizeAndStitch } from "@/lib/podcast";
 
 export const runtime = "nodejs";
@@ -70,7 +70,7 @@ export async function POST(
   const podcastId = uuid();
   const now = Date.now();
   db.prepare(
-    "INSERT INTO podcasts (id, notebook_id, title, status, created_at) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO notes (id, notebook_id, type, title, status, created_at) VALUES (?, ?, 'podcast', ?, ?, ?)",
   ).run(
     podcastId,
     id,
@@ -88,7 +88,7 @@ export async function POST(
       // === Step 1: draft script ==============================================
       const script = await draftScript(topic);
       db.prepare(
-        "UPDATE podcasts SET script = ?, status = ? WHERE id = ?",
+        "UPDATE notes SET script = ?, status = ? WHERE id = ?",
       ).run(script, "synthesizing", podcastId);
 
       // === Step 2: parse turns ==============================================
@@ -109,14 +109,14 @@ export async function POST(
       await synthesizeAndStitch(turns, outPath);
 
       db.prepare(
-        "UPDATE podcasts SET status = ?, audio_url = ? WHERE id = ?",
+        "UPDATE notes SET status = ?, audio_url = ? WHERE id = ?",
       ).run("ready", `/podcasts/${fileName}`, podcastId);
     } catch (err) {
       // Any failure — script empty, parse failed, ElevenLabs 402 — gets
       // serialized into the row so the UI can display it. The user never
       // sees a silent failure.
       db.prepare(
-        "UPDATE podcasts SET status = ?, error = ? WHERE id = ?",
+        "UPDATE notes SET status = ?, error = ? WHERE id = ?",
       ).run(
         "failed",
         err instanceof Error ? err.message : String(err),
@@ -125,8 +125,8 @@ export async function POST(
     }
   })();
 
-  const podcast = db
-    .prepare("SELECT * FROM podcasts WHERE id = ?")
-    .get(podcastId) as Podcast;
-  return NextResponse.json({ podcast });
+  const note = db
+    .prepare("SELECT * FROM notes WHERE id = ?")
+    .get(podcastId) as Note;
+  return NextResponse.json({ note });
 }

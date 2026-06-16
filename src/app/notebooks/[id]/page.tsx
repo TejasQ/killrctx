@@ -44,10 +44,12 @@ type Notebook = { id: string; title: string; openrag_collection: string };
 type Document = { id: string; filename: string; bytes: number; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string };
-type Podcast = {
+type Note = {
   id: string;
+  type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
   title: string;
-  status: "pending" | "scripting" | "synthesizing" | "ready" | "failed";
+  content: string | null;
+  status: "pending" | "scripting" | "synthesizing" | "ready" | "failed" | null;
   audio_url: string | null;
   script: string | null;
   error: string | null;
@@ -66,10 +68,55 @@ export default function NotebookPage({
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [podcasts, setPodcasts] = useState<Podcast[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
+  const [sourcesWidth, setSourcesWidth] = useState(280); // px, min 180 max 520
+  const [sourcesDragging, setSourcesDragging] = useState(false);
+  const [studioCollapsed, setStudioCollapsed] = useState(false);
+  const [studioWidth, setStudioWidth] = useState(360); // px, min 280 max 720
+  const [studioDragging, setStudioDragging] = useState(false);
+  // True while a note is open in full reading view — widens the Studio column.
+  const [studioExpanded, setStudioExpanded] = useState(false);
+
+  // Drag-to-resize Sources panel. Called from the handle inside SourcesPanel
+  // on mousedown; we attach mousemove/mouseup to the window so the drag stays
+  // live even if the cursor moves outside the handle.
+  function startSourcesResize(startX: number) {
+    const startWidth = sourcesWidth;
+    setSourcesDragging(true);
+    function onMove(e: MouseEvent) {
+      const next = Math.min(520, Math.max(180, startWidth + e.clientX - startX));
+      setSourcesWidth(next);
+    }
+    function onUp() {
+      setSourcesDragging(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // Drag-to-resize Studio panel. Handle is on the left edge; dragging left
+  // widens the panel so the delta is subtracted rather than added.
+  function startStudioResize(startX: number) {
+    const startWidth = studioWidth;
+    setStudioDragging(true);
+    function onMove(e: MouseEvent) {
+      const next = Math.min(720, Math.max(280, startWidth - (e.clientX - startX)));
+      setStudioWidth(next);
+    }
+    function onUp() {
+      setStudioDragging(false);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
 
   // One fetch, five state updates. Called on mount and after every mutating
-  // action (upload, chat send, podcast create, source delete). The bundle
+  // action (upload, chat send, note create, source delete). The bundle
   // endpoint means we don't have a waterfall of parallel fetches.
   async function refresh() {
     const res = await fetch(`/api/notebooks/${id}`);
@@ -82,24 +129,23 @@ export default function NotebookPage({
     // On subsequent refreshes, keep whatever the user already selected.
     setActiveConvId((prev) => prev ?? data.conversations?.[0]?.id ?? null);
     setMessages(data.messages);
-    setPodcasts(data.podcasts);
+    setNotes(data.notes);
   }
   useEffect(() => {
     refresh();
   }, [id]);
 
-  // Poll while any podcast is non-terminal. The interval is cleared as soon
-  // as every podcast has hit `ready` or `failed`, so we're not hitting the
-  // server forever. 3s is a comfortable rate — generation takes 30-90s, so
-  // the user typically sees ~10 polls per episode.
+  // Poll while any podcast note is non-terminal. The interval is cleared as
+  // soon as every podcast has hit `ready` or `failed`. Text-based note types
+  // generate synchronously so they never need polling.
   useEffect(() => {
-    const pending = podcasts.some(
-      (p) => p.status !== "ready" && p.status !== "failed",
+    const pending = notes.some(
+      (n) => n.type === "podcast" && n.status !== "ready" && n.status !== "failed",
     );
     if (!pending) return;
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
-  }, [podcasts]);
+  }, [notes]);
 
   // Poll while any document is still being indexed by OpenRAG. Same pattern
   // as the podcast poller above — clears itself once all documents are settled.
@@ -139,11 +185,21 @@ export default function NotebookPage({
         <div className="text-xs text-muted">collection: {notebook.openrag_collection}</div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[280px_1fr_360px] overflow-hidden">
+      <div
+        style={{
+          gridTemplateColumns: `${sourcesCollapsed ? "48px" : `${sourcesWidth}px`} 1fr ${studioCollapsed ? "48px" : studioExpanded ? `${Math.max(studioWidth, 680)}px` : `${studioWidth}px`}`,
+          // Only animate during collapse/expand, not while drag-resizing.
+          transition: sourcesDragging || studioDragging ? "none" : "grid-template-columns 200ms ease",
+        }}
+        className="grid min-h-0 flex-1 overflow-hidden"
+      >
         <SourcesPanel
           notebookId={id}
           documents={documents}
           onUploaded={refresh}
+          collapsed={sourcesCollapsed}
+          onToggle={() => setSourcesCollapsed((v) => !v)}
+          onResizeDrag={startSourcesResize}
         />
         <ChatPanel
           notebookId={id}
@@ -177,7 +233,16 @@ export default function NotebookPage({
             )
           }
         />
-        <StudioPanel notebookId={id} podcasts={podcasts} onCreated={refresh} onDeleted={refresh} />
+        <StudioPanel
+          notebookId={id}
+          notes={notes}
+          onCreated={refresh}
+          onDeleted={refresh}
+          onExpandChange={setStudioExpanded}
+          collapsed={studioCollapsed}
+          onToggle={() => setStudioCollapsed((v) => !v)}
+          onResizeDrag={startStudioResize}
+        />
       </div>
     </div>
   );
@@ -194,10 +259,16 @@ function SourcesPanel({
   notebookId,
   documents,
   onUploaded,
+  collapsed,
+  onToggle,
+  onResizeDrag,
 }: {
   notebookId: string;
   documents: Document[];
   onUploaded: () => void;
+  collapsed: boolean;
+  onToggle: () => void;
+  onResizeDrag: (startX: number) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
@@ -322,11 +393,33 @@ function SourcesPanel({
 
   const allSelected = documents.length > 0 && selected.size === documents.length;
 
+  if (collapsed) {
+    return (
+      <aside className="flex min-h-0 flex-col items-center border-r border-edge bg-panel py-3 gap-3">
+        <button onClick={onToggle} className="text-muted hover:text-white" title="Expand Sources">
+          ≡
+        </button>
+        <span className="text-[10px] text-muted [writing-mode:vertical-rl] rotate-180 tracking-wider uppercase">
+          Sources
+        </span>
+      </aside>
+    );
+  }
+
   return (
     <>
-    <aside className="flex min-h-0 flex-col border-r border-edge bg-panel">
-      <div className="border-b border-edge px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted">
-        Sources
+    <aside className="relative flex min-h-0 flex-col border-r border-edge bg-panel">
+      {/* Drag handle — sits on the right edge, 8px wide so it's easy to grab */}
+      <div
+        onMouseDown={(e) => { e.preventDefault(); onResizeDrag(e.clientX); }}
+        className="absolute right-0 top-0 h-full w-2 cursor-col-resize z-10 hover:bg-accent/20 active:bg-accent/30"
+        title="Drag to resize"
+      />
+      <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted">Sources</span>
+        <button onClick={onToggle} className="text-xs text-muted hover:text-white" title="Collapse Sources">
+          ‹
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {documents.length === 0 ? (
@@ -723,182 +816,268 @@ function ChatPanel({
 }
 
 // ============================================================================
+// NOTE_TYPES — metadata for the type-selector grid
+// ============================================================================
+// Each entry drives one card in the 3-column grid: icon, display label, and
+// the API path suffix used when POSTing to generate. Podcast uses its own
+// dedicated route; the rest go through /notes/<type>.
+// ============================================================================
+const NOTE_TYPES = [
+  { type: "podcast",  label: "Podcast",  icon: "🎙", color: "bg-cyan-500/10    border-cyan-500/20    hover:border-cyan-400/50    hover:bg-cyan-500/15",    activeColor: "border-cyan-400/70    bg-cyan-500/20    shadow-[0_0_12px_rgba(34,211,238,0.15)]",    route: (id: string) => `/api/notebooks/${id}/podcast` },
+  { type: "summary",  label: "Summary",  icon: "☰",  color: "bg-fuchsia-500/10 border-fuchsia-500/20 hover:border-fuchsia-400/50 hover:bg-fuchsia-500/15", activeColor: "border-fuchsia-400/70 bg-fuchsia-500/20 shadow-[0_0_12px_rgba(217,70,239,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/summary` },
+  { type: "mindmap",  label: "Mind Map", icon: "✦",  color: "bg-violet-500/10  border-violet-500/20  hover:border-violet-400/50  hover:bg-violet-500/15",  activeColor: "border-violet-400/70  bg-violet-500/20  shadow-[0_0_12px_rgba(139,92,246,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/mindmap` },
+  { type: "outline",  label: "Outline",  icon: "≡",  color: "bg-pink-500/10    border-pink-500/20    hover:border-pink-400/50    hover:bg-pink-500/15",    activeColor: "border-pink-400/70    bg-pink-500/20    shadow-[0_0_12px_rgba(236,72,153,0.15)]",    route: (id: string) => `/api/notebooks/${id}/notes/outline` },
+  { type: "qa",       label: "Q&A",      icon: "?",  color: "bg-indigo-500/10  border-indigo-500/20  hover:border-indigo-400/50  hover:bg-indigo-500/15",  activeColor: "border-indigo-400/70  bg-indigo-500/20  shadow-[0_0_12px_rgba(99,102,241,0.15)]",   route: (id: string) => `/api/notebooks/${id}/notes/qa` },
+] as const;
+
+type NoteTypeKey = (typeof NOTE_TYPES)[number]["type"];
+
+// ============================================================================
 // StudioPanel — right column
 // ============================================================================
-// "Generate podcast" form + the list of episodes (in any state). Podcast
-// cards have checkboxes for bulk-delete; the bulk-delete bar appears at the
-// bottom whenever ≥1 card is selected.
+// Two modes:
+//   list view   — type-selector grid + generate panel + notes list
+//   expanded view — full-panel reading view for a single note, with a
+//                   "Studio › Title" breadcrumb and a back (×) button
 // ============================================================================
 function StudioPanel({
   notebookId,
-  podcasts,
+  notes,
   onCreated,
   onDeleted,
+  onExpandChange,
+  collapsed,
+  onToggle,
+  onResizeDrag,
 }: {
   notebookId: string;
-  podcasts: Podcast[];
+  notes: Note[];
   onCreated: () => void;
   onDeleted: () => void;
+  onExpandChange: (expanded: boolean) => void;
+  collapsed: boolean;
+  onToggle: () => void;
+  onResizeDrag: (startX: number) => void;
 }) {
+  // Which type card is currently selected (null = grid only, no generate panel).
+  const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
   const [topic, setTopic] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [deleting, setDeleting] = useState(false);
+  // ID of the note currently open in full reading view (null = list view).
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const expandedNote = expandedId ? notes.find((n) => n.id === expandedId) ?? null : null;
+
+  // Tell the parent grid to widen/narrow whenever expanded state changes.
+  useEffect(() => { onExpandChange(expandedId !== null); }, [expandedId]);
 
   async function generate() {
+    if (!activeType) return;
+    const entry = NOTE_TYPES.find((t) => t.type === activeType)!;
     setGenerating(true);
     try {
-      // POST returns the freshly-inserted podcast row (in `scripting`
-      // state). We don't even read the response — `onCreated()` re-fetches
-      // the bundle and the new card appears in the list.
-      await fetch(`/api/notebooks/${notebookId}/podcast`, {
+      await fetch(entry.route(notebookId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic }),
       });
       setTopic("");
+      setActiveType(null); // collapse the generate panel after success
       onCreated();
     } finally {
       setGenerating(false);
     }
   }
 
-  async function bulkDelete() {
-    if (selected.size === 0) return;
-    if (!confirm(`Delete ${selected.size} episode${selected.size > 1 ? "s" : ""}?`))
-      return;
-    setDeleting(true);
-    try {
-      for (const podcastId of selected) {
-        await fetch(`/api/notebooks/${notebookId}/podcasts/${podcastId}`, {
-          method: "DELETE",
-        });
-      }
-    } finally {
-      setSelected(new Set());
-      setDeleting(false);
-      onDeleted();
-    }
+  async function deleteNote(noteId: string) {
+    // If the deleted note is currently expanded, return to list view.
+    if (expandedId === noteId) setExpandedId(null);
+    await fetch(`/api/notebooks/${notebookId}/notes/${noteId}`, { method: "DELETE" });
+    onDeleted();
   }
 
-  function toggleSelect(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  // Shared drag handle element — placed on the left edge of every Studio view.
+  const resizeHandle = (
+    <div
+      onMouseDown={(e) => { e.preventDefault(); onResizeDrag(e.clientX); }}
+      className="absolute left-0 top-0 h-full w-2 cursor-col-resize z-10 hover:bg-accent/20 active:bg-accent/30"
+      title="Drag to resize"
+    />
+  );
+
+  // ── Collapsed strip ────────────────────────────────────────────────────────
+  if (collapsed) {
+    return (
+      <aside className="relative flex min-h-0 flex-col items-center border-l border-edge bg-panel py-3 gap-3">
+        {resizeHandle}
+        <button onClick={onToggle} className="text-muted hover:text-white" title="Expand Studio">
+          ✦
+        </button>
+        <span className="text-[10px] text-muted [writing-mode:vertical-rl] tracking-wider uppercase">
+          Studio
+        </span>
+      </aside>
+    );
   }
 
-  const allSelected = podcasts.length > 0 && selected.size === podcasts.length;
-
-  return (
-    <aside className="flex min-h-0 flex-col border-l border-edge bg-panel">
-      <div className="border-b border-edge px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted">
-        Studio
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        <div className="rounded-lg border border-edge p-3">
-          <div className="text-sm font-medium">Generate podcast</div>
-          <p className="mt-1 text-xs text-muted">
-            OpenRAG drafts a two-host script grounded in your sources, ElevenLabs
-            narrates each turn.
-          </p>
-          <input
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="Optional topic / focus"
-            className="mt-3 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent"
-          />
+  // ── Expanded reading view ──────────────────────────────────────────────────
+  if (expandedNote) {
+    const meta = NOTE_TYPES.find((t) => t.type === expandedNote.type);
+    return (
+      <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
+        {resizeHandle}
+        {/* Breadcrumb header: "Studio › Note title" with collapse toggle */}
+        <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+          <div className="flex items-center gap-1.5 text-xs text-muted">
+            <button onClick={onToggle} className="font-semibold uppercase tracking-wider hover:text-white" title="Collapse Studio">Studio</button>
+            <span>›</span>
+            <span className="truncate max-w-[160px] text-white">{expandedNote.title}</span>
+          </div>
           <button
-            onClick={generate}
-            disabled={generating}
-            className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            onClick={() => setExpandedId(null)}
+            className="rounded p-1 text-muted hover:text-white"
+            title="Back to Studio"
           >
-            {generating && <Spinner size="sm" />}
-            {generating ? "Queuing…" : "Generate"}
+            ✕
           </button>
         </div>
+        {/* Full scrollable content */}
+        <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
+          {expandedNote.type === "podcast" ? (
+            // Podcast expanded view: audio player + script
+            <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
+          ) : expandedNote.content ? (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {expandedNote.content}
+            </ReactMarkdown>
+          ) : (
+            <p className="text-xs text-muted">No content yet.</p>
+          )}
+        </div>
+        {/* Footer: type label + delete */}
+        <div className="flex items-center justify-between border-t border-edge px-4 py-2">
+          <span className="text-xs text-muted">{meta?.icon} {meta?.label}</span>
+          <button
+            onClick={() => deleteNote(expandedNote.id)}
+            className="text-xs text-muted hover:text-red-300"
+          >
+            Delete note
+          </button>
+        </div>
+      </aside>
+    );
+  }
 
-        <div className="mt-5 space-y-3">
-          {podcasts.map((p) => (
-            <PodcastCard
-              key={p.id}
-              podcast={p}
-              checked={selected.has(p.id)}
-              onToggle={() => toggleSelect(p.id)}
+  // ── List view ──────────────────────────────────────────────────────────────
+  return (
+    <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
+      {resizeHandle}
+      <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wider text-muted">Studio</span>
+        <button onClick={onToggle} className="text-xs text-muted hover:text-white" title="Collapse Studio">
+          ›
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+
+        {/* Type-selector grid — 3 columns, each card is icon + label + chevron */}
+        <div className="grid grid-cols-3 gap-2">
+          {NOTE_TYPES.map(({ type, label, icon, color, activeColor }) => {
+            const active = activeType === type;
+            return (
+              <button
+                key={type}
+                onClick={() => setActiveType(active ? null : type)}
+                className={`flex items-center justify-between rounded-lg border p-2.5 text-left transition
+                  ${active ? activeColor : color}
+                  ${active ? "text-white" : "text-zinc-300"}`}
+              >
+                <div className="flex flex-col gap-1">
+                  <span className="text-base leading-none">{icon}</span>
+                  <span className="text-xs font-medium leading-none">{label}</span>
+                </div>
+                <span className="text-xs opacity-50">›</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Inline generate panel — only visible when a type is selected */}
+        {activeType && (
+          <div className="mt-3 rounded-lg border border-edge bg-ink/40 p-3">
+            <div className="text-xs font-medium text-muted">
+              {NOTE_TYPES.find((t) => t.type === activeType)?.label}
+            </div>
+            <input
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="Optional topic / focus"
+              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent"
             />
-          ))}
-          {podcasts.length === 0 && (
-            <p className="text-xs text-muted">No episodes yet.</p>
+            <button
+              onClick={generate}
+              disabled={generating}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {generating && <Spinner size="sm" />}
+              {generating ? "Generating…" : "Generate"}
+            </button>
+          </div>
+        )}
+
+        {/* Notes list — all types unified, newest first */}
+        <div className="mt-5 space-y-3">
+          {notes.map((note) =>
+            note.type === "podcast" ? (
+              <PodcastCard key={note.id} note={note} onDelete={() => deleteNote(note.id)} />
+            ) : (
+              <NoteCard
+                key={note.id}
+                note={note}
+                onDelete={() => deleteNote(note.id)}
+                onExpand={() => setExpandedId(note.id)}
+              />
+            )
+          )}
+          {notes.length === 0 && (
+            <p className="text-xs text-muted">No notes yet. Pick a type above to generate one.</p>
           )}
         </div>
       </div>
-
-      {/* Bulk-delete bar — only visible when ≥1 episode is selected */}
-      {selected.size > 0 && (
-        <div className="flex items-center gap-2 border-t border-edge px-3 py-2">
-          <button
-            onClick={() =>
-              setSelected(allSelected ? new Set() : new Set(podcasts.map((p) => p.id)))
-            }
-            className="text-xs text-muted hover:text-white"
-          >
-            {allSelected ? "Deselect all" : "Select all"}
-          </button>
-          <button
-            onClick={bulkDelete}
-            disabled={deleting}
-            className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
-          >
-            {deleting && <Spinner size="xs" />}
-            Delete selected ({selected.size})
-          </button>
-        </div>
-      )}
     </aside>
   );
 }
 
 // ============================================================================
-// PodcastCard — one row per episode
+// PodcastCard — card for a podcast note
 // ============================================================================
-// Renders three different "modes" depending on status: in-flight (just the
-// title + status pill), ready (audio player), failed (error text). The
-// script toggle is independent — it's available as soon as scripting
-// finishes, which gives you something to read while synthesis runs.
-// `checked` / `onToggle` wire the card into the StudioPanel bulk-select.
+// Renders three different "modes" depending on status: in-flight (title +
+// status pill), ready (audio player), failed (error text). The script toggle
+// is independent — available as soon as scripting finishes.
 // ============================================================================
-function PodcastCard({
-  podcast,
-  checked,
-  onToggle,
-}: {
-  podcast: Podcast;
-  checked: boolean;
-  onToggle: () => void;
-}) {
+function PodcastCard({ note, onDelete }: { note: Note; onDelete: () => void }) {
   const [showScript, setShowScript] = useState(false);
+  const icon = NOTE_TYPES.find((t) => t.type === "podcast")!.icon;
   return (
     <div className="group rounded-lg border border-edge p-3">
       <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={checked}
-          onChange={onToggle}
-          className={`h-3.5 w-3.5 flex-shrink-0 cursor-pointer appearance-none rounded-sm border border-edge bg-edge transition
-            checked:border-accent checked:bg-accent
-            ${checked ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
-        />
-        <div className="min-w-0 flex-1 text-sm font-medium truncate">{podcast.title}</div>
-        <StatusPill status={podcast.status} />
+        <span className="text-sm">{icon}</span>
+        <div className="min-w-0 flex-1 text-sm font-medium truncate">{note.title}</div>
+        <StatusPill status={note.status} />
+        <button
+          onClick={onDelete}
+          className="ml-1 text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
+        >
+          ✕
+        </button>
       </div>
-      {podcast.status === "ready" && podcast.audio_url && (
-        <audio controls src={podcast.audio_url} className="mt-2 w-full" />
+      {note.status === "ready" && note.audio_url && (
+        <audio controls src={note.audio_url} className="mt-2 w-full" />
       )}
-      {podcast.status === "failed" && (
-        <p className="mt-2 text-xs text-red-300">{podcast.error}</p>
+      {note.status === "failed" && (
+        <p className="mt-2 text-xs text-red-300">{note.error}</p>
       )}
-      {podcast.script && (
+      {note.script && (
         <button
           onClick={() => setShowScript((s) => !s)}
           className="mt-2 text-xs text-accent hover:underline"
@@ -906,10 +1085,59 @@ function PodcastCard({
           {showScript ? "Hide script" : "Show script"}
         </button>
       )}
-      {showScript && podcast.script && (
+      {showScript && note.script && (
         <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-ink p-2 text-xs text-muted">
-          {podcast.script}
+          {note.script}
         </pre>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// NoteCard — card for text-based note types (summary, mindmap, outline, qa)
+// ============================================================================
+// Click the row to expand/collapse an inline preview. The ⤢ button opens
+// the full reading view (fills the Studio panel). Delete on hover.
+// ============================================================================
+function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => void; onExpand: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const meta = NOTE_TYPES.find((t) => t.type === note.type);
+  return (
+    <div className="group rounded-lg border border-edge">
+      {/* Row is a div so the action buttons inside it are valid HTML */}
+      <div
+        onClick={() => setExpanded((e) => !e)}
+        className="flex w-full cursor-pointer items-center gap-2 p-3 text-left"
+      >
+        <span className="text-sm">{meta?.icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium truncate">{note.title}</div>
+          <div className="text-[10px] text-muted">{meta?.label}</div>
+        </div>
+        <span className="text-xs text-muted">{expanded ? "▾" : "▸"}</span>
+        {/* Expand to full reading view */}
+        <button
+          onClick={(e) => { e.stopPropagation(); onExpand(); }}
+          className="text-xs text-muted opacity-0 hover:text-white group-hover:opacity-100"
+          title="Open full view"
+        >
+          ⤢
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          className="text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
+          title="Delete note"
+        >
+          ✕
+        </button>
+      </div>
+      {expanded && note.content && (
+        <div className="border-t border-edge px-3 py-2 text-sm">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            {note.content}
+          </ReactMarkdown>
+        </div>
       )}
     </div>
   );
@@ -922,12 +1150,14 @@ function PodcastCard({
 // the pill is the cheapest way to make the card visually breathe while
 // the user waits.
 // ============================================================================
-function StatusPill({ status }: { status: Podcast["status"] }) {
+type PodcastStatus = "pending" | "scripting" | "synthesizing" | "ready" | "failed";
+function StatusPill({ status }: { status: PodcastStatus | null }) {
+  if (!status) return null;
   const inFlight =
     status === "pending" ||
     status === "scripting" ||
     status === "synthesizing";
-  const map: Record<Podcast["status"], string> = {
+  const map: Record<PodcastStatus, string> = {
     pending: "bg-zinc-800 text-zinc-300",
     scripting: "bg-amber-950/40 text-amber-300",
     synthesizing: "bg-blue-950/40 text-blue-300",

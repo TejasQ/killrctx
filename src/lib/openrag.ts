@@ -174,3 +174,38 @@ export async function deleteDocument(filename: string): Promise<void> {
 export async function probeSettings(): Promise<void> {
   await getClient().settings.get();
 }
+
+const NOTE_PROMPTS: Record<string, string> = {
+  summary:
+    "Write a concise prose summary of the key information in the sources. " +
+    "Focus on the most important facts, themes, and conclusions.",
+  mindmap:
+    "Create a hierarchical mind map of the key concepts in the sources. " +
+    "Use nested markdown lists (- item, indent child items with two spaces). " +
+    "Do not use any other formatting.",
+  outline:
+    "Write a structured outline of the topics covered in the sources. " +
+    "Use markdown headings (##, ###) and numbered lists.",
+  qa:
+    "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
+    "Format each pair as:\n**Q: ...?**\nA: ...",
+};
+
+/**
+ * Ask OpenRAG to generate a text-based note from the indexed sources.
+ *
+ * Each note type has its own prompt; the optional `topic` narrows the focus.
+ * Returns both the markdown content and the OpenRAG responseId so the caller
+ * (the API route) can persist it — the responseId is needed later to clean up
+ * the OpenRAG thread when the note is deleted.
+ * Uses limit:12 for broader retrieval coverage, same as the podcast script draft.
+ */
+export async function generateNote(args: {
+  type: "summary" | "mindmap" | "outline" | "qa";
+  topic?: string;
+}): Promise<{ content: string; responseId: string }> {
+  const base = NOTE_PROMPTS[args.type];
+  const prompt = args.topic ? `${base} Focus on: ${args.topic}.` : base;
+  const { response, responseId } = await chat({ prompt, limit: 12 });
+  return { content: response, responseId };
+}

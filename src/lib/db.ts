@@ -28,9 +28,9 @@
 //                  with one default conversation; the user can create more.
 //   messages       user/assistant turns, scoped to a conversation.
 //                  `response_id` is OpenRAG's reply ID for threading.
-//   podcasts       per-episode row. `status` walks pending → scripting →
-//                  synthesizing → ready/failed; the UI polls until it's one
-//                  of the terminal states.
+//   notes          anything the Studio generates: podcast, summary, mindmap,
+//                  outline, qa. Each type is self-contained; podcast rows also
+//                  carry status/audio_url/script/error (null on other types).
 //
 // Foreign keys all cascade on delete so removing a notebook cleans up
 // everything owned by it.
@@ -78,14 +78,17 @@ export type Conversation = {
   created_at: number;
 };
 
-export type Podcast = {
+export type Note = {
   id: string;
   notebook_id: string;
+  type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
   title: string;
-  status: "pending" | "scripting" | "synthesizing" | "ready" | "failed";
-  audio_url: string | null;
-  script: string | null;
-  error: string | null;
+  content: string | null;      // AI-generated markdown; null while podcast is in-flight
+  response_id: string | null;  // OpenRAG chatId — used to clean up the thread on delete
+  status: "pending" | "scripting" | "synthesizing" | "ready" | "failed" | null; // podcast only
+  audio_url: string | null;    // podcast only
+  script: string | null;       // podcast only
+  error: string | null;        // podcast only
   created_at: number;
 };
 
@@ -152,6 +155,18 @@ function getDb(): Database.Database {
     // documents table doesn't exist yet — CREATE TABLE below includes the column.
   }
 
+  // Add response_id to notes if it was created before that column existed.
+  try {
+    const noteCols = conn
+      .prepare("PRAGMA table_info(notes)")
+      .all() as { name: string }[];
+    if (noteCols.length > 0 && !noteCols.some((c) => c.name === "response_id")) {
+      conn.exec("ALTER TABLE notes ADD COLUMN response_id TEXT");
+    }
+  } catch {
+    // notes table doesn't exist yet — CREATE TABLE below handles it.
+  }
+
   // Schema. `IF NOT EXISTS` makes this idempotent; we run it on every boot.
   conn.exec(`
     CREATE TABLE IF NOT EXISTS notebooks (
@@ -188,18 +203,36 @@ function getDb(): Database.Database {
       created_at      INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS podcasts (
-      id TEXT PRIMARY KEY,
-      notebook_id TEXT NOT NULL,
-      title TEXT NOT NULL,
-      status TEXT NOT NULL,
-      audio_url TEXT,
-      script TEXT,
-      error TEXT,
-      created_at INTEGER NOT NULL,
+    CREATE TABLE IF NOT EXISTS notes (
+      id          TEXT    PRIMARY KEY,
+      notebook_id TEXT    NOT NULL,
+      type        TEXT    NOT NULL,
+      title       TEXT    NOT NULL,
+      content     TEXT,
+      response_id TEXT,
+      status      TEXT,
+      audio_url   TEXT,
+      script      TEXT,
+      error       TEXT,
+      created_at  INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
   `);
+
+  // Migrate legacy `podcasts` table into `notes` on first boot after upgrade.
+  // INSERT OR IGNORE is idempotent — safe to run on every restart.
+  const hasPodcasts = (
+    conn.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='podcasts'`).all()
+  ).length > 0;
+  if (hasPodcasts) {
+    conn.exec(`
+      INSERT OR IGNORE INTO notes
+        (id, notebook_id, type, title, content, status, audio_url, script, error, created_at)
+      SELECT id, notebook_id, 'podcast', title, NULL, status, audio_url, script, error, created_at
+      FROM podcasts;
+      DROP TABLE podcasts;
+    `);
+  }
 
   // Back-fill: for each notebook that has messages with no conversation_id,
   // create one default "Conversation 1" row and assign all its messages to it.

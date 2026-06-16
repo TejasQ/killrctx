@@ -6,7 +6,7 @@
 // every time something might have changed: an upload finishes, a chat reply
 // lands, a podcast transitions states). The response bundles everything the
 // UI needs in one round-trip — notebook metadata, documents, conversations,
-// messages, podcasts — so we don't have a waterfall of separate fetches.
+// messages, notes — so we don't have a waterfall of separate fetches.
 //
 // Why a single fat endpoint instead of many small ones?
 //   The page is dense and re-fetches frequently. Bundling cuts client-side
@@ -15,7 +15,7 @@
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import db, { Notebook, Document, Message, Podcast, Conversation } from "@/lib/db";
+import db, { Notebook, Document, Message, Note, Conversation } from "@/lib/db";
 import { getTaskStatus } from "@/lib/openrag";
 
 export const runtime = "nodejs";
@@ -28,7 +28,7 @@ export const runtime = "nodejs";
  *   - documents:      newest first (most recently uploaded sits at the top)
  *   - conversations:  oldest first (stable list order for the switcher)
  *   - messages:       oldest first (chat reads top-to-bottom)
- *   - podcasts:       newest first (latest episode shows at the top of Studio)
+ *   - notes:          newest first (latest note shows at the top of Studio)
  */
 export async function GET(
   _: Request,
@@ -58,11 +58,11 @@ export async function GET(
       "SELECT * FROM messages WHERE notebook_id = ? ORDER BY created_at ASC",
     )
     .all(id) as Message[];
-  const podcasts = db
+  const notes = db
     .prepare(
-      "SELECT * FROM podcasts WHERE notebook_id = ? ORDER BY created_at DESC",
+      "SELECT * FROM notes WHERE notebook_id = ? ORDER BY created_at DESC",
     )
-    .all(id) as Podcast[];
+    .all(id) as Note[];
 
   // For each document still marked 'indexing', fire a background status check
   // against OpenRAG and update SQLite so the next poll sees the new state.
@@ -84,7 +84,7 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({ notebook, documents, conversations, messages, podcasts });
+  return NextResponse.json({ notebook, documents, conversations, messages, notes });
 }
 
 /**
@@ -123,7 +123,7 @@ export async function PATCH(
  * DELETE /api/notebooks/[id]
  *
  * Drops the notebook row; the schema's `ON DELETE CASCADE` foreign keys
- * clean up documents, conversations, messages and podcasts automatically.
+ * clean up documents, conversations, messages and notes automatically.
  * Note this only cleans up *our* SQLite — the OpenSearch vectors still exist
  * (we don't have a "delete by notebook" path on the OpenRAG side yet).
  */

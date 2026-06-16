@@ -33,6 +33,8 @@
 
 import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Spinner from "@/components/Spinner";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
@@ -354,6 +356,67 @@ function SourcesPanel({
 }
 
 // ============================================================================
+// Tailwind-styled overrides for react-markdown inside the chat bubbles.
+// _Basically_, react-markdown renders bare HTML elements by default; without
+// these overrides they inherit no visual styling in the dark theme.
+// remarkGfm enables tables, strikethrough, and task lists (GitHub Flavored Markdown).
+import type { Components } from "react-markdown";
+// Components is a named export even though Markdown itself is the default export.
+const markdownComponents: Components = {
+  table: ({ children }) => (
+    <div className="mb-3 overflow-x-auto rounded-lg border border-edge">
+      <table className="w-full border-collapse text-xs">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-edge/60">{children}</thead>,
+  tbody: ({ children }) => <tbody>{children}</tbody>,
+  tr: ({ children }) => (
+    // tbody rows alternate: odd gets a faint tint; thead rows are covered by bg-edge/60.
+    <tr className="border-b border-edge last:border-0 odd:bg-white/[0.02]">{children}</tr>
+  ),
+  th: ({ children }) => (
+    <th className="border-r border-edge px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted last:border-r-0">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border-r border-edge px-3 py-2 last:border-r-0">{children}</td>
+  ),
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  h1: ({ children }) => <h1 className="mb-2 text-base font-bold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 text-sm font-bold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
+  ul: ({ children }) => <ul className="mb-2 list-disc pl-5 space-y-0.5">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-2 list-decimal pl-5 space-y-0.5">{children}</ol>,
+  li: ({ children }) => <li>{children}</li>,
+  code: ({ children, className }) => {
+    // react-markdown passes a `language-*` className for fenced code blocks.
+    const isBlock = className?.startsWith("language-");
+    return isBlock ? (
+      <code className="block rounded bg-ink px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+        {children}
+      </code>
+    ) : (
+      <code className="rounded bg-ink px-1 font-mono text-xs">{children}</code>
+    );
+  },
+  pre: ({ children }) => (
+    <pre className="mb-2 overflow-x-auto rounded border border-edge">{children}</pre>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mb-2 border-l-2 border-accent pl-3 text-muted">{children}</blockquote>
+  ),
+  strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent underline hover:text-accent/80">
+      {children}
+    </a>
+  ),
+  hr: () => <hr className="my-3 border-edge" />,
+};
+
+
 // ChatPanel — middle column
 // ============================================================================
 // The conversation. A header bar lets the user pick a prior conversation or
@@ -505,8 +568,18 @@ function ChatPanel({
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
                   {m.role === "user" ? "You" : "Notebook"}
                 </div>
-                <div className="whitespace-pre-wrap rounded-lg border border-edge bg-panel px-4 py-3">
-                  {m.content}
+                <div className="rounded-lg border border-edge bg-panel px-4 py-3">
+                  {m.role === "user" ? (
+                    // User messages are plain text — no need to parse markdown.
+                    <span className="whitespace-pre-wrap">{m.content}</span>
+                  ) : (
+                    // Assistant responses often contain markdown (headers, lists,
+                    // code blocks). ReactMarkdown turns them into real HTML elements
+                    // so they render correctly instead of showing raw syntax.
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {m.content}
+                    </ReactMarkdown>
+                  )}
                 </div>
               </li>
             ))}

@@ -62,6 +62,15 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  // Guard: verify the conversation belongs to this notebook so a caller
+  // can't insert messages or rename conversations in a different notebook.
+  const conversation = db
+    .prepare("SELECT id FROM conversations WHERE id = ? AND notebook_id = ?")
+    .get(conversationId, id);
+  if (!conversation) {
+    return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+  }
+
   // Find the most recent assistant turn *in this conversation* with a
   // response_id — that's what we hand to OpenRAG to continue the thread.
   // Scoping to conversation_id means two conversations in the same notebook

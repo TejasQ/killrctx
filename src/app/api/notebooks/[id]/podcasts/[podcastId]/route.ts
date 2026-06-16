@@ -40,8 +40,11 @@ export async function DELETE(
   // Clean up the audio file if one was written. The pattern
   // `/podcasts/<id>.mp3` is set by the podcast generation route.
   if (podcast.audio_url) {
-    const filename = podcast.audio_url.replace(/^\/podcasts\//, "");
-    const filePath = join(process.cwd(), "public", "podcasts", filename);
+    // basename() strips any path components so a malformed audio_url like
+    // "/podcasts/../../etc/passwd" can't escape the public/podcasts/ directory.
+    const { basename } = await import("node:path");
+    const safeFilename = basename(podcast.audio_url);
+    const filePath = join(process.cwd(), "public", "podcasts", safeFilename);
     try {
       unlinkSync(filePath);
     } catch {

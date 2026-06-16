@@ -118,9 +118,8 @@ export async function ingestDocument(args: {
  * Remove a conversation thread from OpenRAG by its chatId.
  *
  * The `chatId` is what OpenRAG calls the threading token — our SQLite column
- * stores it as `response_id`. If the conversation never had an assistant reply
- * there is no chatId to clean up, so callers should pass null/undefined and
- * this function becomes a no-op.
+ * stores it as `response_id`. Callers must only call this when a chatId
+ * exists (i.e. the conversation had at least one assistant reply).
  *
  * Best-effort — callers swallow errors so the SQLite delete always succeeds
  * even if OpenRAG is unreachable.

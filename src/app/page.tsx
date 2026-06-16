@@ -75,11 +75,15 @@ export default function Home() {
     if (!trimmed || trimmed === nb.title) return;
     // Optimistic update — swap the title in local state immediately.
     setNotebooks((n) => n.map((x) => (x.id === nb.id ? { ...x, title: trimmed } : x)));
-    await fetch(`/api/notebooks/${nb.id}`, {
+    const res = await fetch(`/api/notebooks/${nb.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: trimmed }),
     });
+    // Revert the optimistic update if the server rejected it.
+    if (!res.ok) {
+      setNotebooks((n) => n.map((x) => (x.id === nb.id ? { ...x, title: nb.title } : x)));
+    }
   }
 
   return (

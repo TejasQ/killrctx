@@ -85,7 +85,7 @@ export default function NotebookPage({
     const startWidth = sourcesWidth;
     setSourcesDragging(true);
     function onMove(e: MouseEvent) {
-      const next = Math.min(520, Math.max(180, startWidth + e.clientX - startX));
+      const next = Math.max(180, startWidth + e.clientX - startX);
       setSourcesWidth(next);
     }
     function onUp() {
@@ -103,7 +103,7 @@ export default function NotebookPage({
     const startWidth = studioWidth;
     setStudioDragging(true);
     function onMove(e: MouseEvent) {
-      const next = Math.min(720, Math.max(280, startWidth - (e.clientX - startX)));
+      const next = Math.max(280, startWidth - (e.clientX - startX));
       setStudioWidth(next);
     }
     function onUp() {
@@ -753,12 +753,12 @@ function ChatPanel({
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
         {visibleMessages.length === 0 && !sending ? (
-          <div className="mx-auto max-w-lg pt-20 text-center text-sm text-muted">
+          <div className="pt-20 text-center text-sm text-muted">
             Add sources, then ask a question. Answers come from OpenRAG retrieval over
             your indexed documents.
           </div>
         ) : (
-          <ul className="mx-auto max-w-2xl space-y-5">
+          <ul className="space-y-5">
             {visibleMessages.map((m) => (
               <li key={m.id} className="text-sm leading-relaxed">
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
@@ -790,11 +790,11 @@ function ChatPanel({
       </div>
       <form onSubmit={send} className="border-t border-edge bg-panel p-4">
         {error && (
-          <p className="mx-auto mb-2 max-w-2xl rounded border border-red-900/50 bg-red-950/30 p-2 text-xs text-red-300">
+          <p className="mb-2 rounded border border-red-900/50 bg-red-950/30 p-2 text-xs text-red-300">
             {error}
           </p>
         )}
-        <div className="mx-auto flex max-w-2xl gap-2">
+        <div className="flex gap-2">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

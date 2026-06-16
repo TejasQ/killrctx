@@ -202,6 +202,19 @@ function SourcesPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // File types confirmed to work with Docling ingest. Used for the file
+  // picker's accept attribute and to reject unsupported files before they
+  // hit the server. Based on the Docling InputFormat enum, minus formats
+  // that either errored in practice (gif) or require special pipeline
+  // configuration we don't have (audio/asr, obscure XML patent formats).
+  const SUPPORTED_EXTENSIONS = new Set([
+    ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
+    ".md", ".html", ".txt", ".asciidoc",
+    ".png", ".jpg", ".jpeg", ".webp", ".tiff",
+    ".latex", ".tex",
+  ]);
+  const ACCEPT = [...SUPPORTED_EXTENSIONS].join(",");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   // When duplicates are detected, we park the pending files here and show
@@ -223,6 +236,18 @@ function SourcesPanel({
   async function upload(files: File[]) {
     if (files.length === 0) return;
     setError(null);
+
+    // Reject unsupported file types before hitting the server.
+    const unsupported = files.filter((f) => {
+      const ext = "." + f.name.split(".").pop()?.toLowerCase();
+      return !SUPPORTED_EXTENSIONS.has(ext);
+    });
+    if (unsupported.length > 0) {
+      setError(
+        `Unsupported file type${unsupported.length > 1 ? "s" : ""}: ${unsupported.map((f) => f.name).join(", ")}`,
+      );
+      return;
+    }
 
     // Check for duplicates before starting. If any selected files share a
     // filename with an existing source, show OverwriteDialog so the user can
@@ -389,6 +414,7 @@ function SourcesPanel({
           ref={inputRef}
           type="file"
           multiple
+          accept={ACCEPT}
           className="hidden"
           onChange={(e) => {
             const files = Array.from(e.target.files ?? []);

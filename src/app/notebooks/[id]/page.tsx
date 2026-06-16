@@ -41,7 +41,7 @@ import Spinner from "@/components/Spinner";
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
 type Notebook = { id: string; title: string; openrag_collection: string };
-type Document = { id: string; filename: string; bytes: number };
+type Document = { id: string; filename: string; bytes: number; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string };
 type Podcast = {
@@ -100,6 +100,15 @@ export default function NotebookPage({
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
   }, [podcasts]);
+
+  // Poll while any document is still being indexed by OpenRAG. Same pattern
+  // as the podcast poller above — clears itself once all documents are settled.
+  useEffect(() => {
+    const indexing = documents.some((d) => d.ingest_status === "indexing");
+    if (!indexing) return;
+    const t = setInterval(refresh, 3000);
+    return () => clearInterval(t);
+  }, [documents]);
 
   if (!notebook) {
     return <div className="p-8 text-sm text-muted">Loading…</div>;
@@ -195,6 +204,17 @@ function SourcesPanel({
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  // When duplicates are detected, we park the pending files here and show
+  // OverwriteDialog. The dialog resolves a Promise with the filenames the
+  // user chose to overwrite — upload() awaits that before continuing.
+  const [overwritePrompt, setOverwritePrompt] = useState<{
+    duplicates: File[];
+    resolve: (toOverwrite: File[]) => void;
+  } | null>(null);
+
+  function askOverwrite(duplicates: File[]): Promise<File[]> {
+    return new Promise((resolve) => setOverwritePrompt({ duplicates, resolve }));
+  }
 
   // Upload files sequentially. The API route accepts one `file` per
   // request, so we loop here rather than batching multipart on the server.
@@ -203,11 +223,37 @@ function SourcesPanel({
   async function upload(files: File[]) {
     if (files.length === 0) return;
     setError(null);
-    setUploading({ done: 0, total: files.length });
+
+    // Check for duplicates before starting. If any selected files share a
+    // filename with an existing source, show OverwriteDialog so the user can
+    // pick which ones to overwrite. Confirmed duplicates are deleted first so
+    // the API's 409 guard doesn't block the re-upload.
+    const duplicates = files.filter((f) => documents.some((d) => d.filename === f.name));
+    let filesToUpload = files;
+    if (duplicates.length > 0) {
+      const toOverwrite = await askOverwrite(duplicates);
+      // Delete the old versions the user approved before re-uploading.
+      for (const f of toOverwrite) {
+        const existing = documents.find((d) => d.filename === f.name);
+        if (existing) {
+          await fetch(`/api/notebooks/${notebookId}/documents/${existing.id}`, {
+            method: "DELETE",
+          });
+        }
+      }
+      // Keep non-duplicates + approved overwrites; drop the rest.
+      const overwriteNames = new Set(toOverwrite.map((f) => f.name));
+      filesToUpload = files.filter(
+        (f) => !duplicates.includes(f) || overwriteNames.has(f.name),
+      );
+    }
+
+    if (filesToUpload.length === 0) return;
+    setUploading({ done: 0, total: filesToUpload.length });
     try {
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        setUploading({ done: i, total: files.length });
+      for (let i = 0; i < filesToUpload.length; i++) {
+        const file = filesToUpload[i];
+        setUploading({ done: i, total: filesToUpload.length });
         const form = new FormData();
         form.append("file", file);
         const res = await fetch(`/api/notebooks/${notebookId}/documents`, {
@@ -261,6 +307,7 @@ function SourcesPanel({
   const allSelected = documents.length > 0 && selected.size === documents.length;
 
   return (
+    <>
     <aside className="flex min-h-0 flex-col border-r border-edge bg-panel">
       <div className="border-b border-edge px-4 py-3 text-xs font-semibold uppercase tracking-wider text-muted">
         Sources
@@ -291,8 +338,26 @@ function SourcesPanel({
                 />
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{d.filename}</div>
-                  <div className="text-xs text-muted">
-                    {(d.bytes / 1024).toFixed(1)} KB
+                  <div className="flex items-center gap-1.5 text-xs text-muted">
+                    <span>{(d.bytes / 1024).toFixed(1)} KB</span>
+                    {d.ingest_status === "indexing" && (
+                      <>
+                        <span>·</span>
+                        <Spinner size="xs" />
+                        <span>Indexing…</span>
+                      </>
+                    )}
+                    {d.ingest_status === "failed" && (
+                      <>
+                        <span>·</span>
+                        <span
+                          className="cursor-help text-red-400"
+                          title={d.ingest_error ?? "Ingest failed"}
+                        >
+                          ✕ Failed
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               </li>
@@ -353,6 +418,17 @@ function SourcesPanel({
         </button>
       </div>
     </aside>
+
+    {overwritePrompt && (
+      <OverwriteDialog
+        duplicates={overwritePrompt.duplicates}
+        onDone={(toOverwrite) => {
+          overwritePrompt.resolve(toOverwrite);
+          setOverwritePrompt(null);
+        }}
+      />
+    )}
+    </>
   );
 }
 
@@ -921,3 +997,95 @@ function InlineTitle({
   );
 }
 
+
+// ============================================================================
+// OverwriteDialog — modal shown when the user uploads a file that already
+// exists in the notebook.
+// _Basically_, it lists the duplicate filenames with a checkbox each, and an
+// "Overwrite selected" button. Resolves via onDone() with the files the user
+// approved — the caller deletes those before re-uploading.
+// ============================================================================
+function OverwriteDialog({
+  duplicates,
+  onDone,
+}: {
+  duplicates: File[];
+  onDone: (toOverwrite: File[]) => void;
+}) {
+  const [checked, setChecked] = useState<Set<string>>(
+    // Default: all duplicates selected for overwrite.
+    new Set(duplicates.map((f) => f.name)),
+  );
+
+  function toggle(name: string) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  }
+
+  const allChecked = checked.size === duplicates.length;
+
+  return (
+    // Backdrop
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="w-full max-w-sm rounded-lg border border-edge bg-panel p-5 shadow-xl">
+        <h2 className="mb-1 text-sm font-semibold text-white">
+          {duplicates.length === 1 ? "File already exists" : "Files already exist"}
+        </h2>
+        <p className="mb-4 text-xs text-muted">
+          Select which files to overwrite. Unchecked files will be skipped.
+        </p>
+
+        <ul className="mb-4 space-y-2">
+          {duplicates.map((f) => (
+            <li key={f.name} className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id={`ow-${f.name}`}
+                checked={checked.has(f.name)}
+                onChange={() => toggle(f.name)}
+                className="h-3.5 w-3.5 flex-shrink-0 cursor-pointer appearance-none rounded-sm border border-edge bg-edge
+                  checked:border-accent checked:bg-accent"
+              />
+              <label
+                htmlFor={`ow-${f.name}`}
+                className="cursor-pointer truncate text-xs text-white"
+              >
+                {f.name}
+              </label>
+            </li>
+          ))}
+        </ul>
+
+        {/* Select-all toggle */}
+        <button
+          onClick={() =>
+            setChecked(allChecked ? new Set() : new Set(duplicates.map((f) => f.name)))
+          }
+          className="mb-4 text-xs text-muted hover:text-white"
+        >
+          {allChecked ? "Deselect all" : "Select all"}
+        </button>
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={() => onDone([])}
+            className="rounded px-3 py-1.5 text-xs text-muted hover:bg-edge hover:text-white"
+          >
+            Skip all
+          </button>
+          <button
+            onClick={() => onDone(duplicates.filter((f) => checked.has(f.name)))}
+            className="rounded bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/80 disabled:opacity-50"
+          >
+            {checked.size === 0
+              ? "Continue without overwriting"
+              : `Overwrite ${checked.size === duplicates.length ? "all" : checked.size}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

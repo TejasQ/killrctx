@@ -56,6 +56,8 @@ export type Document = {
   filename: string;
   bytes: number;
   openrag_id: string | null; // OpenRAG task ID returned by /router/upload_ingest
+  ingest_status: "indexing" | "ready" | "failed";
+  ingest_error: string | null; // error message from OpenRAG if ingest_status = 'failed'
   created_at: number;
 };
 
@@ -134,6 +136,22 @@ function getDb(): Database.Database {
     // all columns already in place, so nothing to migrate.
   }
 
+  try {
+    const docCols = conn
+      .prepare("PRAGMA table_info(documents)")
+      .all() as { name: string }[];
+    // Default 'ready' means existing rows (ingested before this column existed)
+    // are treated as fully indexed — no spinner on documents that are already in.
+    if (docCols.length > 0 && !docCols.some((c) => c.name === "ingest_status")) {
+      conn.exec("ALTER TABLE documents ADD COLUMN ingest_status TEXT NOT NULL DEFAULT 'ready'");
+    }
+    if (docCols.length > 0 && !docCols.some((c) => c.name === "ingest_error")) {
+      conn.exec("ALTER TABLE documents ADD COLUMN ingest_error TEXT");
+    }
+  } catch {
+    // documents table doesn't exist yet — CREATE TABLE below includes the column.
+  }
+
   // Schema. `IF NOT EXISTS` makes this idempotent; we run it on every boot.
   conn.exec(`
     CREATE TABLE IF NOT EXISTS notebooks (
@@ -155,6 +173,8 @@ function getDb(): Database.Database {
       filename TEXT NOT NULL,
       bytes INTEGER NOT NULL,
       openrag_id TEXT,
+      ingest_status TEXT NOT NULL DEFAULT 'ready',
+      ingest_error TEXT,
       created_at INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );

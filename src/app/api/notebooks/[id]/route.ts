@@ -16,6 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Podcast, Conversation } from "@/lib/db";
+import { getTaskStatus } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -62,6 +63,26 @@ export async function GET(
       "SELECT * FROM podcasts WHERE notebook_id = ? ORDER BY created_at DESC",
     )
     .all(id) as Podcast[];
+
+  // For each document still marked 'indexing', fire a background status check
+  // against OpenRAG and update SQLite so the next poll sees the new state.
+  // Void — we don't wait for these; the client will pick up the result on its
+  // next 3s refresh. Same fire-and-forget pattern as podcast generation.
+  for (const doc of documents) {
+    if (doc.ingest_status === "indexing" && doc.openrag_id) {
+      void (async () => {
+        try {
+          const { status, error } = await getTaskStatus(doc.openrag_id!);
+          if (status !== "indexing") {
+            db.prepare("UPDATE documents SET ingest_status = ?, ingest_error = ? WHERE id = ?")
+              .run(status, error, doc.id);
+          }
+        } catch {
+          // OpenRAG unreachable — leave status as 'indexing', retry next poll.
+        }
+      })();
+    }
+  }
 
   return NextResponse.json({ notebook, documents, conversations, messages, podcasts });
 }

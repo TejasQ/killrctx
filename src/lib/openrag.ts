@@ -98,10 +98,8 @@ export async function chat(args: {
 /**
  * Send a file to OpenRAG for ingestion.
  *
- * `wait: false` fires and forgets — the SDK will not internally poll for
- * completion. The actual chunking + embedding happens asynchronously, but
- * for files under a few MB it's effectively done by the time the next chat
- * query runs. The returned task_id is stored in SQLite for debugging.
+ * `wait: false` returns immediately with a task_id. Ingest status is tracked
+ * via `getTaskStatus()` and polled by the bundle route on every client refresh.
  */
 export async function ingestDocument(args: {
   filename: string;
@@ -112,6 +110,33 @@ export async function ingestDocument(args: {
   const file = new File([blob], args.filename, { type: args.contentType });
   const r = await getClient().documents.ingest({ file, filename: args.filename, wait: false });
   return { taskId: (r as IngestResponse).task_id ?? "" };
+}
+
+/**
+ * Fetch the current ingest status of a task from OpenRAG.
+ *
+ * Uses `getTaskStatus` (single HTTP fetch) not `waitForTask` (blocking poll loop).
+ * Returns the status and, on failure, the first error message found in the
+ * per-file `files` map from the OpenRAG task response.
+ */
+export async function getTaskStatus(
+  taskId: string,
+): Promise<{ status: "indexing" | "ready" | "failed"; error: string | null }> {
+  // Cast to the internal shape — IngestTaskStatus.files is Record<string, unknown>.
+  const r = (await getClient().documents.getTaskStatus(taskId)) as {
+    successful_files: number;
+    failed_files: number;
+    files: Record<string, { error?: string | null }>;
+  };
+
+  if (r.failed_files > 0) {
+    // Extract the first non-null error message from the per-file results.
+    const error =
+      Object.values(r.files).find((f) => f.error)?.error ?? "Ingest failed";
+    return { status: "failed", error };
+  }
+  if (r.successful_files > 0) return { status: "ready", error: null };
+  return { status: "indexing", error: null };
 }
 
 /**

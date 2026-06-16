@@ -196,7 +196,9 @@ function getDb(): Database.Database {
     CREATE TABLE IF NOT EXISTS messages (
       id              TEXT PRIMARY KEY,
       notebook_id     TEXT NOT NULL,
-      conversation_id TEXT,
+      -- NOT NULL for fresh installs. Existing databases get conversation_id
+      -- via the ALTER TABLE migration above, which is nullable for compat.
+      conversation_id TEXT NOT NULL,
       role            TEXT NOT NULL,
       content         TEXT NOT NULL,
       response_id     TEXT,

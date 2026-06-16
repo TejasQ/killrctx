@@ -219,11 +219,14 @@ export default function NotebookPage({
               );
               setActiveConvId(replacement.id);
             } else {
-              setConversations((cs) => cs.filter((c) => c.id !== deletedId));
-              setActiveConvId((prev) => {
-                if (prev !== deletedId) return prev;
-                // Switch to the first remaining conversation.
-                return conversations.find((c) => c.id !== deletedId)?.id ?? null;
+              // Derive next active id from the post-delete list in the same
+              // updater so we never read the stale `conversations` closure.
+              setConversations((cs) => {
+                const next = cs.filter((c) => c.id !== deletedId);
+                setActiveConvId((prev) =>
+                  prev !== deletedId ? prev : (next[0]?.id ?? null),
+                );
+                return next;
               });
             }
           }}
@@ -286,6 +289,7 @@ function SourcesPanel({
     ".latex", ".tex",
   ]);
   const ACCEPT = [...SUPPORTED_EXTENSIONS].join(",");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   // When duplicates are detected, we park the pending files here and show
@@ -370,11 +374,17 @@ function SourcesPanel({
     if (!confirm(`Delete ${selected.size} source${selected.size > 1 ? "s" : ""}? This removes their chunks from the index.`))
       return;
     setDeleting(true);
+    setDeleteError(null);
+    const failed: string[] = [];
     try {
       for (const docId of selected) {
-        await fetch(`/api/notebooks/${notebookId}/documents/${docId}`, {
+        const res = await fetch(`/api/notebooks/${notebookId}/documents/${docId}`, {
           method: "DELETE",
         });
+        if (!res.ok) failed.push(docId);
+      }
+      if (failed.length > 0) {
+        setDeleteError(`${failed.length} source${failed.length > 1 ? "s" : ""} could not be deleted.`);
       }
     } finally {
       setSelected(new Set());
@@ -482,23 +492,28 @@ function SourcesPanel({
 
       {/* Bulk-delete bar — only visible when ≥1 source is selected */}
       {selected.size > 0 && (
-        <div className="flex items-center gap-2 border-t border-edge px-3 py-2">
-          <button
-            onClick={() =>
-              setSelected(allSelected ? new Set() : new Set(documents.map((d) => d.id)))
-            }
-            className="text-xs text-muted hover:text-white"
-          >
-            {allSelected ? "Deselect all" : "Select all"}
-          </button>
-          <button
-            onClick={bulkDelete}
-            disabled={deleting}
-            className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
-          >
-            {deleting && <Spinner size="xs" />}
-            Delete selected ({selected.size})
-          </button>
+        <div className="flex flex-col gap-1 border-t border-edge px-3 py-2">
+          {deleteError && (
+            <p className="text-xs text-red-300">{deleteError}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() =>
+                setSelected(allSelected ? new Set() : new Set(documents.map((d) => d.id)))
+              }
+              className="text-xs text-muted hover:text-white"
+            >
+              {allSelected ? "Deselect all" : "Select all"}
+            </button>
+            <button
+              onClick={bulkDelete}
+              disabled={deleting}
+              className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
+            >
+              {deleting && <Spinner size="xs" />}
+              Delete selected ({selected.size})
+            </button>
+          </div>
         </div>
       )}
 
@@ -1191,9 +1206,11 @@ function InlineTitle({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
 
-  // Keep draft in sync if the parent title changes (e.g. after a refresh).
-  // Only update when not currently editing so we don't clobber the user's input.
-  if (!editing && draft !== title) setDraft(title);
+  // Keep draft in sync if the parent title changes while not editing.
+  // useEffect avoids calling setState during render, which React warns about.
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [title, editing]);
 
   function startEdit() {
     setDraft(title);

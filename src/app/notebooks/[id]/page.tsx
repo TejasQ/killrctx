@@ -226,21 +226,12 @@ function SourcesPanel({
 
     // Check for duplicates before starting. If any selected files share a
     // filename with an existing source, show OverwriteDialog so the user can
-    // pick which ones to overwrite. Confirmed duplicates are deleted first so
-    // the API's 409 guard doesn't block the re-upload.
+    // pick which ones to overwrite. The API handles overwrite natively —
+    // no pre-delete needed; the SQLite row is updated in place.
     const duplicates = files.filter((f) => documents.some((d) => d.filename === f.name));
     let filesToUpload = files;
     if (duplicates.length > 0) {
       const toOverwrite = await askOverwrite(duplicates);
-      // Delete the old versions the user approved before re-uploading.
-      for (const f of toOverwrite) {
-        const existing = documents.find((d) => d.filename === f.name);
-        if (existing) {
-          await fetch(`/api/notebooks/${notebookId}/documents/${existing.id}`, {
-            method: "DELETE",
-          });
-        }
-      }
       // Keep non-duplicates + approved overwrites; drop the rest.
       const overwriteNames = new Set(toOverwrite.map((f) => f.name));
       filesToUpload = files.filter(

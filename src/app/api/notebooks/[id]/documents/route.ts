@@ -58,16 +58,12 @@ export async function POST(
     return NextResponse.json({ error: "file missing" }, { status: 400 });
   }
 
-  // Reject duplicates before hitting OpenRAG — ingest is slow and expensive.
-  const existing = db
+  // If this filename already exists in the notebook, we'll overwrite the
+  // existing row after re-ingesting. OpenRAG handles re-ingest by filename
+  // natively — no need to delete first.
+  const existingDoc = db
     .prepare("SELECT id FROM documents WHERE notebook_id = ? AND filename = ?")
-    .get(id, file.name);
-  if (existing) {
-    return NextResponse.json(
-      { error: `"${file.name}" is already in this notebook` },
-      { status: 409 },
-    );
-  }
+    .get(id, file.name) as { id: string } | undefined;
 
   // arrayBuffer() loads the whole file into memory — fine for ≤ a few MB
   // (typical PDFs/markdown). For multi-100MB uploads you'd switch to a
@@ -89,12 +85,18 @@ export async function POST(
     );
   }
 
-  // Save the pointer row only after OpenRAG accepted the file. `openrag_id`
-  // is the backend task ID — useful for debugging via /tasks/<id>.
-  const docId = uuid();
-  db.prepare(
-    "INSERT INTO documents (id, notebook_id, filename, bytes, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(docId, id, file.name, bytes.length, taskId || null, "indexing", Date.now());
+  // Save the pointer row. If the file was already in the notebook (overwrite),
+  // update in place so the row id and created_at stay stable for the UI.
+  const docId = existingDoc?.id ?? uuid();
+  if (existingDoc) {
+    db.prepare(
+      "UPDATE documents SET bytes = ?, openrag_id = ?, ingest_status = 'indexing', ingest_error = NULL WHERE id = ?",
+    ).run(bytes.length, taskId || null, docId);
+  } else {
+    db.prepare(
+      "INSERT INTO documents (id, notebook_id, filename, bytes, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, 'indexing', ?)",
+    ).run(docId, id, file.name, bytes.length, taskId || null, Date.now());
+  }
 
   return NextResponse.json({
     document: { id: docId, filename: file.name, bytes: bytes.length },

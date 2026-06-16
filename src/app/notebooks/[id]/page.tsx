@@ -613,7 +613,8 @@ function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask anything about your sources…"
-            className="flex-1 rounded-lg border border-edge bg-ink px-3 py-2 text-sm outline-none focus:border-accent"
+            disabled={sending}
+            className="flex-1 rounded-lg border border-edge bg-ink px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-50"
           />
           <button
             disabled={sending || !input.trim() || !activeConvId}

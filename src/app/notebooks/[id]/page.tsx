@@ -35,6 +35,7 @@ import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
 import Spinner from "@/components/Spinner";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
@@ -356,12 +357,21 @@ function SourcesPanel({
 }
 
 // ============================================================================
-// Tailwind-styled overrides for react-markdown inside the chat bubbles.
+// markdownComponents — Tailwind-styled element overrides for react-markdown.
 // _Basically_, react-markdown renders bare HTML elements by default; without
 // these overrides they inherit no visual styling in the dark theme.
-// remarkGfm enables tables, strikethrough, and task lists (GitHub Flavored Markdown).
-import type { Components } from "react-markdown";
-// Components is a named export even though Markdown itself is the default export.
+// remarkGfm (passed as a plugin at the call site) enables tables, strikethrough,
+// and task lists (GitHub Flavored Markdown).
+// ============================================================================
+
+// The LLM sometimes emits blank lines between table rows, which breaks GFM
+// table parsing — the parser sees the blank line as ending the block and falls
+// back to rendering raw pipe characters. This strips those spurious blank lines
+// so the table is contiguous and parses correctly.
+function fixMarkdown(raw: string): string {
+  return raw.replace(/(\|[^\n]*\n)\n+(?=\|)/g, "$1");
+}
+
 const markdownComponents: Components = {
   table: ({ children }) => (
     <div className="mb-3 overflow-x-auto rounded-lg border border-edge">
@@ -577,7 +587,7 @@ function ChatPanel({
                     // code blocks). ReactMarkdown turns them into real HTML elements
                     // so they render correctly instead of showing raw syntax.
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                      {m.content}
+                      {fixMarkdown(m.content)}
                     </ReactMarkdown>
                   )}
                 </div>

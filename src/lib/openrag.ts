@@ -21,6 +21,10 @@
 // fields the SDK's SettingsResponse doesn't expose (providers[].has_api_key).
 // See src/app/api/health/route.ts and src/app/api/setup/route.ts.
 //
+// Model listing (GET /api/models/{provider}) and settings update are also
+// handled here. The SDK has no models endpoint so we raw-fetch OpenRAG's
+// frontend proxy for those — same pattern as the health route.
+//
 // Things that surprised us building this:
 //
 //   - **No collections.** OpenRAG indexes everything into one shared
@@ -167,11 +171,15 @@ export async function deleteDocument(filename: string): Promise<void> {
 /**
  * Probe the OpenRAG instance to verify it is reachable and responding.
  *
- * Used by the health route's external-instance path — if this resolves,
- * the instance is up. Throws on any network or HTTP error.
+ * Used by the health route's external-instance path — returns the LLM and
+ * embedding identifiers so the health route can surface them in the UI.
+ * Throws on any network or HTTP error.
  */
-export async function probeSettings(): Promise<void> {
-  await getClient().settings.get();
+export async function probeSettings(): Promise<{ llm: string; embedding: string }> {
+  const s = await getClient().settings.get();
+  const llm = `${s.agent.llm_provider ?? "?"}/${s.agent.llm_model ?? "?"}`;
+  const embedding = `${s.knowledge.embedding_provider ?? "?"}/${s.knowledge.embedding_model ?? "?"}`;
+  return { llm, embedding };
 }
 
 const NOTE_PROMPTS: Record<string, string> = {
@@ -207,4 +215,52 @@ export async function generateNote(args: {
   const prompt = args.topic ? `${base} Focus on: ${args.topic}.` : base;
   const { response, responseId } = await chat({ prompt, limit: 12 });
   return { content: response, responseId };
+}
+
+export type ModelOption = { value: string; label: string; default: boolean };
+export type ProviderModels = { language_models: ModelOption[]; embedding_models: ModelOption[] };
+
+/**
+ * Fetch the model list for a single provider from OpenRAG's frontend proxy.
+ *
+ * Why raw fetch? The SDK has no models endpoint — only OpenRAG's own UI calls
+ * these routes. We proxy through our server routes so OPENRAG_URL never leaks
+ * to the browser.
+ *
+ * Each provider uses a different HTTP method (Ollama is GET; the rest are POST
+ * with an optional api_key body). OpenRAG's backend fills in the stored key
+ * when the body field is empty, so we can pass `{}` safely.
+ */
+export async function getModelsForProvider(provider: string): Promise<ProviderModels> {
+  const base = process.env.OPENRAG_URL ?? "http://localhost:3000";
+
+  // Ollama endpoint name in OpenRAG's router is "ollama"; IBM WatsonX is "ibm".
+  const path = provider === "watsonx" ? "ibm" : provider;
+
+  const res = provider === "ollama"
+    ? await fetch(`${base}/api/models/${path}`, { cache: "no-store" })
+    : await fetch(`${base}/api/models/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+        cache: "no-store",
+      });
+
+  if (!res.ok) throw new Error(`models/${path} returned ${res.status}`);
+  return res.json() as Promise<ProviderModels>;
+}
+
+/**
+ * Update the active LLM or embedding model in OpenRAG, then return the fresh
+ * "provider/model" strings for both so callers can update the UI in one step.
+ */
+export async function updateSettings(args: {
+  llm_provider?: string;
+  llm_model?: string;
+  embedding_provider?: string;
+  embedding_model?: string;
+}): Promise<{ llm: string; embedding: string }> {
+  await getClient().settings.update(args);
+  // Re-read to get confirmed values — update() only returns a message string.
+  return probeSettings();
 }

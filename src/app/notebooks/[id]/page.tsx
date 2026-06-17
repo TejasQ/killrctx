@@ -37,6 +37,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import Spinner from "@/components/Spinner";
+import { useOpenRAGSettings } from "@/components/OpenRAGContext";
+import ModelPickerPopover from "@/components/ModelPickerPopover";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
@@ -63,6 +65,7 @@ export default function NotebookPage({
 }) {
   // Next 15+ delivers `params` as a Promise; React's `use()` unwraps it.
   const { id } = use(params);
+  const { settings: openragSettings, setSettings: setOpenragSettings } = useOpenRAGSettings();
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -182,7 +185,30 @@ export default function NotebookPage({
             }}
           />
         </div>
-        <div className="text-xs text-muted">collection: {notebook.openrag_collection}</div>
+        <div className="flex items-center gap-4 text-xs text-muted">
+          {openragSettings && (
+            <ModelPickerPopover
+              kind="llm"
+              currentValue={openragSettings.llm}
+              onSaved={setOpenragSettings}
+              align="right"
+            >
+              <span title="Click to change model">
+                model:{" "}
+                <span
+                  className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                  }}
+                >
+                  {openragSettings.llm}
+                </span>
+              </span>
+            </ModelPickerPopover>
+          )}
+          <span>collection: {notebook.openrag_collection}</span>
+        </div>
       </header>
 
       <div
@@ -197,6 +223,8 @@ export default function NotebookPage({
           notebookId={id}
           documents={documents}
           onUploaded={refresh}
+          embeddingModel={openragSettings?.embedding ?? null}
+          onEmbeddingModelSaved={setOpenragSettings}
           collapsed={sourcesCollapsed}
           onToggle={() => setSourcesCollapsed((v) => !v)}
           onResizeDrag={startSourcesResize}
@@ -262,6 +290,8 @@ function SourcesPanel({
   notebookId,
   documents,
   onUploaded,
+  embeddingModel,
+  onEmbeddingModelSaved,
   collapsed,
   onToggle,
   onResizeDrag,
@@ -269,6 +299,8 @@ function SourcesPanel({
   notebookId: string;
   documents: Document[];
   onUploaded: () => void;
+  embeddingModel: string | null;
+  onEmbeddingModelSaved: (s: import("@/components/OpenRAGContext").OpenRAGSettings) => void;
   collapsed: boolean;
   onToggle: () => void;
   onResizeDrag: (startX: number) => void;
@@ -425,10 +457,60 @@ function SourcesPanel({
         className="absolute right-0 top-0 h-full w-2 cursor-col-resize z-10 hover:bg-accent/20 active:bg-accent/30"
         title="Drag to resize"
       />
+      {/* Row 1: title + collapse */}
       <div className="flex items-center justify-between border-b border-edge px-4 py-3">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted">Sources</span>
         <button onClick={onToggle} className="text-xs text-muted hover:text-white" title="Collapse Sources">
           ‹
+        </button>
+      </div>
+      {/* Row 2: embedding model picker */}
+      {embeddingModel && (
+        <div className="flex items-center border-b border-edge px-4 py-2">
+          <ModelPickerPopover
+            kind="embedding"
+            currentValue={embeddingModel}
+            onSaved={onEmbeddingModelSaved}
+          >
+            <span title="Click to change embedding model" className="text-xs text-muted">
+              model:{" "}
+              <span
+                className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                style={{
+                  backgroundImage:
+                    "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                }}
+              >
+                {embeddingModel}
+              </span>
+            </span>
+          </ModelPickerPopover>
+        </div>
+      )}
+      {/* Row 3: add source button */}
+      <div className="border-b border-edge px-3 py-2">
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept={ACCEPT}
+          className="hidden"
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            if (files.length) upload(files);
+          }}
+        />
+        <button
+          onClick={() => inputRef.current?.click()}
+          disabled={!!uploading}
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >
+          {uploading && <Spinner size="sm" />}
+          {uploading
+            ? uploading.total > 1
+              ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
+              : "Uploading…"
+            : "+ Add source(s)"}
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -517,31 +599,6 @@ function SourcesPanel({
         </div>
       )}
 
-      <div className="border-t border-edge p-3">
-        <input
-          ref={inputRef}
-          type="file"
-          multiple
-          accept={ACCEPT}
-          className="hidden"
-          onChange={(e) => {
-            const files = Array.from(e.target.files ?? []);
-            if (files.length) upload(files);
-          }}
-        />
-        <button
-          onClick={() => inputRef.current?.click()}
-          disabled={!!uploading}
-          className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          {uploading && <Spinner size="sm" />}
-          {uploading
-            ? uploading.total > 1
-              ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
-              : "Uploading…"
-            : "+ Add source(s)"}
-        </button>
-      </div>
     </aside>
 
     {overwritePrompt && (

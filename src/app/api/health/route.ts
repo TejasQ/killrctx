@@ -108,12 +108,8 @@ export async function GET() {
   // External instances are operator-managed — if settings.get() responds,
   // we trust the instance is configured and let the user in immediately.
   try {
-    await probeSettings();
-    return NextResponse.json({
-      ready: true,
-      external: true,
-      settings: { llm: "external", embedding: "external" },
-    });
+    const settings = await probeSettings();
+    return NextResponse.json({ ready: true, external: true, settings });
   } catch {
     // Neither path is reachable — still booting or misconfigured.
     return NextResponse.json(

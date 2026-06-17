@@ -248,6 +248,30 @@ export async function deleteFilter(filterId: string): Promise<void> {
  *
  * Returns null if the filter is not found or OpenRAG is unreachable.
  */
+/**
+ * Update the icon and color of a knowledge filter in OpenRAG.
+ *
+ * We spread the existing queryData and override only icon+color so the
+ * data_sources / limit / scoreThreshold values are never clobbered.
+ * Returns the confirmed values after update.
+ */
+export async function updateFilterMeta(
+  filterId: string,
+  icon: string,
+  color: string,
+): Promise<void> {
+  const client = getClient();
+  const current = await client.knowledgeFilters.get(filterId);
+  if (!current) throw new Error("filter not found");
+  await client.knowledgeFilters.update(filterId, {
+    queryData: {
+      ...current.queryData,
+      icon,
+      color,
+    },
+  });
+}
+
 export async function getFilterMeta(
   filterId: string,
 ): Promise<{ icon: string | null; color: string | null } | null> {

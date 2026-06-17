@@ -39,7 +39,7 @@ import type { Components } from "react-markdown";
 import Spinner from "@/components/Spinner";
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
 import ModelPickerPopover from "@/components/ModelPickerPopover";
-import FilterBadge from "@/components/FilterBadge";
+import FilterPickerPopover from "@/components/FilterPickerPopover";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
@@ -188,10 +188,14 @@ export default function NotebookPage({
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
           {notebook.openrag_filter_name && (
-            <FilterBadge
+            <FilterPickerPopover
+              notebookId={notebook.id}
               name={notebook.openrag_filter_name}
               icon={notebook.openrag_filter_icon}
               color={notebook.openrag_filter_color}
+              onSaved={(icon, color) =>
+                setNotebook((prev) => prev ? { ...prev, openrag_filter_icon: icon, openrag_filter_color: color } : prev)
+              }
             />
           )}
           {openragSettings && (

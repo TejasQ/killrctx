@@ -33,7 +33,7 @@ import {
   Ghost,
   Gem,
   Swords,
-  Zap,
+  Bolt,
   Shield,
   Hammer,
   Globe,
@@ -63,7 +63,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
   ghost: Ghost,
   gem: Gem,
   swords: Swords,
-  bolt: Zap,          // OpenRAG uses "bolt"; Lucide renamed it to Zap
+  bolt: Bolt,
   shield: Shield,
   hammer: Hammer,
   globe: Globe,
@@ -77,6 +77,7 @@ const ICON_MAP: Record<string, LucideIcon> = {
 // Matches OpenRAG's color scheme — bg-{color}/10 text-{color} border-{color}/20
 // for the unselected / display state used by the badge.
 const COLOR_MAP: Record<string, string> = {
+  zinc: "border-zinc-500/20 bg-zinc-500/10 text-zinc-400",
   red: "border-red-500/20 bg-red-500/10 text-red-400",
   emerald: "border-emerald-500/20 bg-emerald-500/10 text-emerald-400",
   blue: "border-blue-500/20 bg-blue-500/10 text-blue-400",

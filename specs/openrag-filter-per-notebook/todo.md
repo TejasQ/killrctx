@@ -27,4 +27,4 @@ notebook shows the filter chip in the header left of the model picker.
 - Rename filter when notebook title changes (currently fixed at creation time).
 - Scope Studio generation to filter for notebooks that existed before this feature
   (currently those fall back to no-filter behaviour).
-- Display filter colour from `queryData.color` in `FilterBadge` if OpenRAG sets one.
+- ~~Display filter colour from `queryData.color` in `FilterBadge` if OpenRAG sets one.~~ Done — icon and color are now fetched inline on every GET and reflected in the badge immediately.

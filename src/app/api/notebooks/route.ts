@@ -43,9 +43,16 @@ export async function POST(req: NextRequest) {
   // partitioning. Right now nothing reads this field.
   const collection = `nb_${id.replace(/-/g, "")}`;
 
+  const now = Date.now();
   db.prepare(
     "INSERT INTO notebooks (id, title, created_at, openrag_collection) VALUES (?, ?, ?, ?)",
-  ).run(id, title?.trim() || "Untitled notebook", Date.now(), collection);
+  ).run(id, title?.trim() || "Untitled notebook", now, collection);
+
+  // Seed a default conversation so the Chat panel always has an activeConvId.
+  const convId = uuid();
+  db.prepare(
+    "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
+  ).run(convId, id, "Conversation 1", now);
 
   const nb = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")

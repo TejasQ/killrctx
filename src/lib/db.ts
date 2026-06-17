@@ -20,7 +20,9 @@
 //   what the codebase uses everywhere.
 //
 // Schema overview (one notebook -> many of everything else):
-//   notebooks      user-created notebook (one row per notebook in the UI)
+//   notebooks      user-created notebook; openrag_filter_id + openrag_filter_name
+//                  store the per-notebook OpenRAG knowledge filter created at
+//                  notebook creation time (null for notebooks predating this feature).
 //   documents      files the user uploaded; we cache filename/size for the UI
 //                  and the OpenRAG task ID for debugging. The actual chunks
 //                  live in OpenSearch.
@@ -48,6 +50,8 @@ export type Notebook = {
   title: string;
   created_at: number; // ms since epoch (Date.now())
   openrag_collection: string; // unused right now (no per-notebook isolation)
+  openrag_filter_id: string | null;   // OpenRAG knowledge filter ID; null for old notebooks
+  openrag_filter_name: string | null; // display name stored at creation; no round-trip needed
 };
 
 export type Document = {
@@ -155,6 +159,22 @@ function getDb(): Database.Database {
     // documents table doesn't exist yet — CREATE TABLE below includes the column.
   }
 
+  // Add openrag_filter_id and openrag_filter_name to notebooks. Both nullable —
+  // existing notebooks get NULL and fall back to no-filter behaviour.
+  try {
+    const nbCols = conn
+      .prepare("PRAGMA table_info(notebooks)")
+      .all() as { name: string }[];
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_id")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_id TEXT");
+    }
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_name")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_name TEXT");
+    }
+  } catch {
+    // notebooks table doesn't exist yet — CREATE TABLE below includes the columns.
+  }
+
   // Add response_id to notes if it was created before that column existed.
   try {
     const noteCols = conn
@@ -173,7 +193,9 @@ function getDb(): Database.Database {
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      openrag_collection TEXT NOT NULL
+      openrag_collection TEXT NOT NULL,
+      openrag_filter_id   TEXT,
+      openrag_filter_name TEXT
     );
     CREATE TABLE IF NOT EXISTS conversations (
       id          TEXT PRIMARY KEY,

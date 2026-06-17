@@ -78,11 +78,11 @@ GROUNDING
  * the whole corpus. We pass `limit: 12` to give the retrieval tool plenty of
  * passages to work with — podcasts benefit from variety.
  */
-export async function draftScript(topic?: string): Promise<string> {
+export async function draftScript(topic?: string, filterId?: string | null): Promise<string> {
   const prompt = topic
     ? `Topic focus: ${topic}\n\n${SCRIPT_PROMPT}`
     : SCRIPT_PROMPT;
-  const { response } = await chat({ prompt, limit: 12 });
+  const { response } = await chat({ prompt, filterId, limit: 12 });
   const script = response.trim();
   if (!script) throw new Error("OpenRAG returned an empty script");
   return script;

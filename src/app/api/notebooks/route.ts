@@ -5,15 +5,19 @@
 // _Basically_, the home page calls GET to render its list and POST to create
 // a new notebook before navigating to /notebooks/<id>.
 //
-// We mint a `openrag_collection` string per notebook (`nb_<uuid-no-dashes>`)
-// even though OpenRAG doesn't currently use it — see lib/openrag.ts for the
-// "all-documents-in-one-index" caveat. Storing it now means we can flip on
-// /knowledge-filter later without a schema migration.
+// On creation we also create an OpenRAG knowledge filter for the notebook so
+// every chat, note, and podcast call can scope retrieval to only this
+// notebook's documents. The filter ID + name are stored in SQLite so the UI
+// can display the filter chip without a round-trip to OpenRAG.
+//
+// Filter creation is best-effort — if OpenRAG is down the notebook is still
+// created; the document ingest route will retry (see documents/route.ts).
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook } from "@/lib/db";
+import { createFilter } from "@/lib/openrag";
 
 // Force Node.js runtime — better-sqlite3 is a native module and won't load
 // under the Edge runtime.
@@ -43,16 +47,28 @@ export async function POST(req: NextRequest) {
   // partitioning. Right now nothing reads this field.
   const collection = `nb_${id.replace(/-/g, "")}`;
 
+  const resolvedTitle = title?.trim() || "Untitled notebook";
   const now = Date.now();
   db.prepare(
     "INSERT INTO notebooks (id, title, created_at, openrag_collection) VALUES (?, ?, ?, ?)",
-  ).run(id, title?.trim() || "Untitled notebook", now, collection);
+  ).run(id, resolvedTitle, now, collection);
 
   // Seed a default conversation so the Chat panel always has an activeConvId.
   const convId = uuid();
   db.prepare(
     "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
   ).run(convId, id, "Conversation 1", now);
+
+  // Create the OpenRAG knowledge filter. Best-effort — if OpenRAG is unreachable
+  // the notebook row already exists; the ingest route will retry on first upload.
+  try {
+    const { filterId, filterName } = await createFilter(resolvedTitle);
+    db.prepare(
+      "UPDATE notebooks SET openrag_filter_id = ?, openrag_filter_name = ? WHERE id = ?",
+    ).run(filterId, filterName, id);
+  } catch {
+    // OpenRAG down at creation time — filter columns stay NULL.
+  }
 
   const nb = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")

@@ -8,13 +8,16 @@
 // indexes them in OpenSearch, and then chat calls become magic — the backend
 // runs an agent that decides when to call its retrieval tool to ground answers.
 //
-// All communication goes through the official `openrag-sdk` client. Four
+// All communication goes through the official `openrag-sdk` client. Seven
 // in-app CRUD operations are covered here:
 //
-//   client.chat.create()        — send a prompt, get a grounded answer
-//   client.chat.delete(chatId)  — remove a conversation thread from OpenRAG
-//   client.documents.ingest()   — push a file through Docling → embed → index
-//   client.documents.delete()   — remove all chunks for a filename
+//   client.chat.create()                 — send a prompt, get a grounded answer
+//   client.chat.delete(chatId)           — remove a conversation thread from OpenRAG
+//   client.documents.ingest()            — push a file through Docling → embed → index
+//   client.documents.delete()            — remove all chunks for a filename
+//   client.knowledgeFilters.create()     — create a per-notebook retrieval filter
+//   client.knowledgeFilters.get/update() — sync filter's data_sources to ready filenames
+//   client.knowledgeFilters.delete()     — remove a filter on notebook delete
 //
 // Setup and health-probe calls (POST /onboarding, GET /settings) are NOT
 // handled here — those routes use raw fetch() because they need response
@@ -48,6 +51,54 @@
 // ============================================================================
 
 import { OpenRAGClient, type IngestResponse } from "openrag-sdk";
+
+// ============================================================================
+// Debounced filter sync — prevents race conditions on concurrent uploads.
+//
+// _Basically_, when 10 files upload in quick succession each POST handler
+// fires syncFilterSources as a background task. Without debouncing, those
+// 10 concurrent calls each do a get → update round-trip that can interleave
+// and overwrite each other, leaving the filter with only the last file's view
+// of the document list. Instead we:
+//   1. Collect the filter ID into a per-filterId pending set (no-op for deletes
+//      which pass an explicit list directly).
+//   2. Reset a 1.5s debounce timer on every call.
+//   3. When the timer fires, do ONE syncFilterSources with the full SQLite list.
+//
+// The callback is provided by the caller (the document route) because the
+// database is not importable here (lib/openrag.ts has no dependency on lib/db.ts).
+// ============================================================================
+const _pendingSync = new Map<string, {
+  timer: ReturnType<typeof setTimeout>;
+  getFilenames: () => string[];
+}>();
+
+const SYNC_DEBOUNCE_MS = 1500;
+
+/**
+ * Schedule a debounced filter sync for a given filterId.
+ *
+ * `getFilenames` is called when the timer fires (not when scheduled) so it
+ * always reads the freshest list from SQLite, including uploads that landed
+ * after this call was made.
+ */
+export function scheduleSyncFilterSources(filterId: string, getFilenames: () => string[]): void {
+  const existing = _pendingSync.get(filterId);
+  if (existing) clearTimeout(existing.timer);
+
+  const timer = setTimeout(async () => {
+    _pendingSync.delete(filterId);
+    try {
+      await syncFilterSources(filterId, getFilenames());
+    } catch {
+      // Best-effort — same as all other filter operations.
+    }
+  }, SYNC_DEBOUNCE_MS);
+
+  _pendingSync.set(filterId, { timer, getFilenames });
+}
+
+// ============================================================================
 
 let _client: OpenRAGClient | null = null;
 
@@ -85,6 +136,7 @@ function getClient(): OpenRAGClient {
 export async function chat(args: {
   prompt: string;
   previousResponseId?: string | null;
+  filterId?: string | null;
   limit?: number;
 }): Promise<{ response: string; responseId: string }> {
   const r = await getClient().chat.create({
@@ -93,6 +145,9 @@ export async function chat(args: {
     // as `response_id` in SQLite. Undefined (not null) tells the SDK to
     // start a fresh conversation.
     chatId: args.previousResponseId ?? undefined,
+    // filterId scopes retrieval to the notebook's knowledge filter. Undefined
+    // (not null) means no filter — the SDK omits the field entirely.
+    filterId: args.filterId ?? undefined,
     stream: false,
     limit: args.limit ?? 8,
   });
@@ -158,6 +213,68 @@ export async function deleteConversation(chatId: string): Promise<void> {
 }
 
 /**
+ * Create a named knowledge filter in OpenRAG scoped to this notebook.
+ *
+ * `queryData: {}` creates an empty filter — no data_sources restriction, so every
+ * document in the index is reachable. Retrieval is scoped by passing the returned
+ * filterId to chat.create(), not at ingest time.
+ *
+ * Best-effort callers should catch and proceed without a filter if this throws
+ * (e.g. OpenRAG unreachable at notebook creation time).
+ */
+export async function createFilter(name: string): Promise<{ filterId: string; filterName: string }> {
+  const r = await getClient().knowledgeFilters.create({ name, queryData: {} });
+  if (!r.success || !r.id) throw new Error(r.error ?? "filter creation failed");
+  return { filterId: r.id, filterName: name };
+}
+
+/**
+ * Delete a knowledge filter from OpenRAG by its ID.
+ *
+ * Best-effort — callers swallow errors so the SQLite delete always proceeds even
+ * if OpenRAG is unreachable. See DELETE /api/notebooks/[id].
+ */
+export async function deleteFilter(filterId: string): Promise<void> {
+  await getClient().knowledgeFilters.delete(filterId);
+}
+
+/**
+ * Sync a filter's data_sources list to exactly match the given set of filenames.
+ *
+ * Why a full sync instead of per-file append?
+ *   OpenRAG initialises a new filter with data_sources: ["*"] (a wildcard).
+ *   Appending to ["*"] leaves the wildcard in the list, which defeats the
+ *   purpose of per-notebook scoping. A full replace guarantees the list is
+ *   exactly the current set of indexed files, no more and no less.
+ *
+ * The other filter fields (document_types, owners, connector_types) must also
+ * be present as ["*"] wildcards — as shown in the live FilterTime filter —
+ * or OpenRAG returns no results. We preserve any existing values and default
+ * to ["*"] so the update is always safe to call.
+ *
+ * Best-effort — callers swallow errors; ingest still succeeds without it.
+ */
+export async function syncFilterSources(filterId: string, filenames: string[]): Promise<void> {
+  const client = getClient();
+  const current = await client.knowledgeFilters.get(filterId);
+  if (!current) return; // filter not found — nothing to update
+
+  await client.knowledgeFilters.update(filterId, {
+    queryData: {
+      ...current.queryData,
+      filters: {
+        document_types: current.queryData?.filters?.document_types ?? ["*"],
+        owners: current.queryData?.filters?.owners ?? ["*"],
+        connector_types: current.queryData?.filters?.connector_types ?? ["*"],
+        // Replace data_sources with the exact set of ready filenames.
+        // This clears the initial ["*"] wildcard OpenRAG sets on creation.
+        data_sources: filenames,
+      },
+    },
+  });
+}
+
+/**
  * Remove all indexed chunks for a document filename from OpenRAG.
  *
  * Best-effort — callers should swallow errors (the SQLite pointer row is
@@ -210,10 +327,11 @@ const NOTE_PROMPTS: Record<string, string> = {
 export async function generateNote(args: {
   type: "summary" | "mindmap" | "outline" | "qa";
   topic?: string;
+  filterId?: string | null;
 }): Promise<{ content: string; responseId: string }> {
   const base = NOTE_PROMPTS[args.type];
   const prompt = args.topic ? `${base} Focus on: ${args.topic}.` : base;
-  const { response, responseId } = await chat({ prompt, limit: 12 });
+  const { response, responseId } = await chat({ prompt, filterId: args.filterId, limit: 12 });
   return { content: response, responseId };
 }
 

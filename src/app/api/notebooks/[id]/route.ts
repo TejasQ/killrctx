@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation } from "@/lib/db";
-import { getTaskStatus } from "@/lib/openrag";
+import { getTaskStatus, deleteFilter, deleteDocument, deleteConversation } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -122,16 +122,58 @@ export async function PATCH(
 /**
  * DELETE /api/notebooks/[id]
  *
- * Drops the notebook row; the schema's `ON DELETE CASCADE` foreign keys
- * clean up documents, conversations, messages and notes automatically.
- * Note this only cleans up *our* SQLite — the OpenSearch vectors still exist
- * (we don't have a "delete by notebook" path on the OpenRAG side yet).
+ * Cleans up all OpenRAG resources for the notebook (filter, document chunks,
+ * chat threads from messages + notes) then drops the SQLite row. The schema's
+ * `ON DELETE CASCADE` foreign keys handle child rows automatically.
+ *
+ * All OpenRAG deletions run in parallel via Promise.allSettled — failures are
+ * swallowed so the SQLite delete always fires even when OpenRAG is unreachable.
  */
 export async function DELETE(
   _: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
+
+  const notebook = db
+    .prepare("SELECT * FROM notebooks WHERE id = ?")
+    .get(id) as Notebook | undefined;
+
+  if (notebook) {
+    const documents = db
+      .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+      .all(id) as Pick<Document, "filename">[];
+
+    // Collect every response_id that represents an OpenRAG chat thread —
+    // both message threads (one per conversation) and note threads.
+    const msgResponseIds = db
+      .prepare(
+        `SELECT DISTINCT response_id FROM messages
+         WHERE notebook_id = ? AND response_id IS NOT NULL`,
+      )
+      .all(id) as { response_id: string }[];
+    const noteResponseIds = db
+      .prepare(
+        "SELECT response_id FROM notes WHERE notebook_id = ? AND response_id IS NOT NULL",
+      )
+      .all(id) as { response_id: string }[];
+
+    const cleanupTasks: Promise<unknown>[] = [];
+
+    if (notebook.openrag_filter_id) {
+      cleanupTasks.push(deleteFilter(notebook.openrag_filter_id));
+    }
+    for (const { filename } of documents) {
+      cleanupTasks.push(deleteDocument(filename));
+    }
+    for (const { response_id } of [...msgResponseIds, ...noteResponseIds]) {
+      cleanupTasks.push(deleteConversation(response_id));
+    }
+
+    // allSettled — never throws; we don't care which individual steps failed.
+    await Promise.allSettled(cleanupTasks);
+  }
+
   db.prepare("DELETE FROM notebooks WHERE id = ?").run(id);
   return NextResponse.json({ ok: true });
 }

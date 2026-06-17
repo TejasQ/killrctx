@@ -131,6 +131,7 @@ export async function POST(
     const r = await chat({
       prompt: grounded,
       previousResponseId: lastAssistant?.response_id ?? null,
+      filterId: notebook.openrag_filter_id ?? null,
     });
     answer = r.response;
     responseId = r.responseId;

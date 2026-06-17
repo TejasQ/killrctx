@@ -33,7 +33,7 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const { content, responseId } = await generateNote({ type: "summary", topic });
+  const { content, responseId } = await generateNote({ type: "summary", topic, filterId: notebook.openrag_filter_id ?? null });
   const now = Date.now();
   const noteId = uuid();
   db.prepare(

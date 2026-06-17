@@ -86,7 +86,7 @@ export async function POST(
   void (async () => {
     try {
       // === Step 1: draft script ==============================================
-      const script = await draftScript(topic);
+      const script = await draftScript(topic, notebook.openrag_filter_id ?? null);
       db.prepare(
         "UPDATE notes SET script = ?, status = ? WHERE id = ?",
       ).run(script, "synthesizing", podcastId);

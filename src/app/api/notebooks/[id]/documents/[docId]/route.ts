@@ -7,6 +7,9 @@
 // chunks from OpenSearch so the chat agent doesn't keep retrieving from a
 // document the user thinks they removed.
 //
+// After deletion we also sync the notebook's filter data_sources to the
+// remaining documents so the filter stays accurate.
+//
 // The OpenRAG cleanup uses deleteDocument() from src/lib/openrag.ts, which
 // calls client.documents.delete(filename). It removes every chunk whose
 // `filename` field matches — an imperfect match (two documents with the same
@@ -15,8 +18,8 @@
 // ============================================================================
 
 import { NextResponse } from "next/server";
-import db, { Document } from "@/lib/db";
-import { deleteDocument } from "@/lib/openrag";
+import db, { Document, Notebook } from "@/lib/db";
+import { deleteDocument, syncFilterSources } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -44,6 +47,24 @@ export async function DELETE(
   } catch {
     // Swallow — the row is already gone from our table; the chunks linger
     // until next OpenRAG restart at worst. Not a hard failure.
+  }
+
+  // Sync the filter's data_sources to the remaining documents (all statuses).
+  // We query after the DELETE so the removed file is already absent — the list
+  // is always ground truth from SQLite, including still-indexing documents.
+  const notebook = db
+    .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
+    .get(id) as Pick<Notebook, "openrag_filter_id"> | undefined;
+  if (notebook?.openrag_filter_id) {
+    const remaining = (
+      db
+        .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+        .all(id) as { filename: string }[]
+    ).map((r) => r.filename);
+
+    void syncFilterSources(notebook.openrag_filter_id, remaining).catch(() => {
+      // Swallow — filter data_sources update is cosmetic; chunks are already gone.
+    });
   }
 
   return NextResponse.json({ ok: true });

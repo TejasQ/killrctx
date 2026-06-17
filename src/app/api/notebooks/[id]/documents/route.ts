@@ -12,6 +12,11 @@
 //   - We own a tiny "list of files the user uploaded" pointer table so the
 //     Sources panel renders without round-tripping OpenRAG.
 //
+// Lazy filter creation: if the notebook was created while OpenRAG was down
+// its openrag_filter_id will be NULL. We attempt to create it here before
+// ingesting so that from this point forward all chat/generation calls are
+// scoped to this notebook's filter.
+//
 // We don't store the file on disk ourselves — once it's in OpenSearch we
 // don't need it. If you wanted a "download original" feature later, you'd
 // add a writeFileSync here under public/uploads or similar.
@@ -20,7 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook } from "@/lib/db";
-import { ingestDocument } from "@/lib/openrag";
+import { ingestDocument, createFilter, scheduleSyncFilterSources } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -96,6 +101,23 @@ export async function POST(
     db.prepare(
       "INSERT INTO documents (id, notebook_id, filename, bytes, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, 'indexing', ?)",
     ).run(docId, id, file.name, bytes.length, taskId || null, Date.now());
+  }
+
+  // Schedule a debounced filter sync. When multiple files upload in quick
+  // succession each call resets the 1.5s timer; only the final fire does the
+  // actual get → update round-trip. getFilenames() is evaluated at fire time
+  // so it always captures every file that has landed by then.
+  const freshNotebook = db
+    .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
+    .get(id) as { openrag_filter_id: string | null } | undefined;
+  if (freshNotebook?.openrag_filter_id) {
+    const filterId = freshNotebook.openrag_filter_id;
+    scheduleSyncFilterSources(filterId, () =>
+      (db
+        .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+        .all(id) as { filename: string }[]
+      ).map((r) => r.filename)
+    );
   }
 
   return NextResponse.json({

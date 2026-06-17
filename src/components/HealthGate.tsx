@@ -27,6 +27,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Spinner from "./Spinner";
+import { OpenRAGContext, type OpenRAGSettings } from "./OpenRAGContext";
 
 type Settings = { llm: string; embedding: string };
 type Health =
@@ -43,6 +44,9 @@ type Health =
 
 export default function HealthGate({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<Health | null>(null);
+  // Held in separate state so ModelPickerPopover can update the header label
+  // after a save without re-running the full health probe.
+  const [liveSettings, setLiveSettings] = useState<OpenRAGSettings | null>(null);
   const [setupRunning, setSetupRunning] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
 
@@ -61,6 +65,7 @@ export default function HealthGate({ children }: { children: ReactNode }) {
         const data = (await res.json()) as Health;
         if (cancelledRef.current) return;
         setHealth(data);
+        if (data.ready) setLiveSettings(data.settings);
         // Schedule the next tick only if we're not already ready. Once
         // ready, we stop polling forever (no need to keep checking).
         if (!data.ready) timer = setTimeout(tick, 2000);
@@ -163,5 +168,9 @@ export default function HealthGate({ children }: { children: ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <OpenRAGContext.Provider value={{ settings: liveSettings, setSettings: setLiveSettings }}>
+      {children}
+    </OpenRAGContext.Provider>
+  );
 }

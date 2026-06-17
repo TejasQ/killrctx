@@ -19,7 +19,7 @@
 
 import { NextResponse } from "next/server";
 import db, { Document, Notebook } from "@/lib/db";
-import { deleteDocument, syncFilterSources } from "@/lib/openrag";
+import { deleteDocument, scheduleSyncFilterSources } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -49,22 +49,20 @@ export async function DELETE(
     // until next OpenRAG restart at worst. Not a hard failure.
   }
 
-  // Sync the filter's data_sources to the remaining documents (all statuses).
-  // We query after the DELETE so the removed file is already absent — the list
-  // is always ground truth from SQLite, including still-indexing documents.
+  // Schedule a debounced filter sync. Bulk-deletes call this route once per
+  // file in quick succession — debouncing means only one get → update fires
+  // after all the deletes settle, with the final SQLite state as ground truth.
   const notebook = db
     .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
     .get(id) as Pick<Notebook, "openrag_filter_id"> | undefined;
   if (notebook?.openrag_filter_id) {
-    const remaining = (
-      db
+    const filterId = notebook.openrag_filter_id;
+    scheduleSyncFilterSources(filterId, () =>
+      (db
         .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
         .all(id) as { filename: string }[]
-    ).map((r) => r.filename);
-
-    void syncFilterSources(notebook.openrag_filter_id, remaining).catch(() => {
-      // Swallow — filter data_sources update is cosmetic; chunks are already gone.
-    });
+      ).map((r) => r.filename)
+    );
   }
 
   return NextResponse.json({ ok: true });

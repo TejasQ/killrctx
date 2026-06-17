@@ -239,6 +239,31 @@ export async function deleteFilter(filterId: string): Promise<void> {
 }
 
 /**
+ * Fetch the icon and color a user has set for a filter in the OpenRAG UI.
+ *
+ * These are not set by us at creation time (`createFilter` produces
+ * `icon: undefined, color: undefined`). Users set them in the OpenRAG filter
+ * editor. We poll on each GET /api/notebooks/[id] and cache in SQLite so the
+ * FilterBadge can match OpenRAG's own visual exactly.
+ *
+ * Returns null if the filter is not found or OpenRAG is unreachable.
+ */
+export async function getFilterMeta(
+  filterId: string,
+): Promise<{ icon: string | null; color: string | null } | null> {
+  const f = await getClient().knowledgeFilters.get(filterId);
+  if (!f) return null;
+  // icon and color are stored inside queryData (alongside filters/limit/etc),
+  // NOT at the top level of the filter object. The SDK type doesn't declare
+  // them, so we cast through unknown to read them without TS errors.
+  const qd = (f.queryData ?? {}) as { icon?: string; color?: string };
+  return {
+    icon: qd.icon ?? null,
+    color: qd.color ?? null,
+  };
+}
+
+/**
  * Sync a filter's data_sources list to exactly match the given set of filenames.
  *
  * Why a full sync instead of per-file append?

@@ -43,7 +43,7 @@ import FilterBadge from "@/components/FilterBadge";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
-type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null };
+type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null };
 type Document = { id: string; filename: string; bytes: number; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string };
@@ -188,7 +188,11 @@ export default function NotebookPage({
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
           {notebook.openrag_filter_name && (
-            <FilterBadge name={notebook.openrag_filter_name} />
+            <FilterBadge
+              name={notebook.openrag_filter_name}
+              icon={notebook.openrag_filter_icon}
+              color={notebook.openrag_filter_color}
+            />
           )}
           {openragSettings && (
             <ModelPickerPopover

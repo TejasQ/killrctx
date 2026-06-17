@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation } from "@/lib/db";
-import { getTaskStatus, deleteFilter, deleteDocument, deleteConversation } from "@/lib/openrag";
+import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -81,6 +81,37 @@ export async function GET(
           // OpenRAG unreachable — leave status as 'indexing', retry next poll.
         }
       })();
+    }
+  }
+
+  // Fetch the filter's current icon and color from OpenRAG inline so the
+  // client always sees the latest values the user set in OpenRAG's own UI.
+  //
+  // Why not fire-and-forget like the ingest-status poller?
+  //   The ingest poller works because the page keeps polling until all
+  //   documents are ready. Icon/color can change at any time with no active
+  //   poll — a background write would only be visible on the *next* poll,
+  //   which may never come. Fetching inline means every manual refresh (F5,
+  //   chat send, upload) picks up the latest visual immediately.
+  //
+  //   The call is cheap: one small HTTP GET to OpenRAG. If OpenRAG is
+  //   unreachable we fall back to the SQLite-cached values so the badge
+  //   still renders. We also update SQLite so repeated GETs don't hit
+  //   OpenRAG if nothing changed (the client sends the same value back).
+  if (notebook.openrag_filter_id) {
+    try {
+      const meta = await getFilterMeta(notebook.openrag_filter_id);
+      if (meta) {
+        db.prepare(
+          "UPDATE notebooks SET openrag_filter_icon = ?, openrag_filter_color = ? WHERE id = ?",
+        ).run(meta.icon, meta.color, id);
+        // Mutate the already-fetched notebook object so this response
+        // carries the fresh values without a second SELECT.
+        notebook.openrag_filter_icon = meta.icon;
+        notebook.openrag_filter_color = meta.color;
+      }
+    } catch {
+      // OpenRAG unreachable — serve the SQLite-cached icon/color as fallback.
     }
   }
 

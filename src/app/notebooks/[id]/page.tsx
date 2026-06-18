@@ -1033,10 +1033,9 @@ function StudioPanel({
   // Which type card is currently selected (null = grid only, no generate panel).
   const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
   const [topic, setTopic] = useState("");
-  const [generating, setGenerating] = useState(false);
-  // Streaming note content being built token-by-token while generating=true.
-  // Shown as a live preview; replaced by the real note card once generation ends.
-  const [streamingNote, setStreamingNote] = useState("");
+  // Map of type → partial streamed content for every in-flight generation.
+  // Multiple types can generate simultaneously; each has its own preview.
+  const [inFlight, setInFlight] = useState<Map<NoteTypeKey, string>>(new Map());
   // ID of the note currently open in full reading view (null = list view).
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -1045,58 +1044,75 @@ function StudioPanel({
   // Tell the parent grid to widen/narrow whenever expanded state changes.
   useEffect(() => { onExpandChange(expandedId !== null); }, [expandedId]);
 
-  async function generate() {
+  // _Basically_, this is fire-and-forget: it kicks off the stream and returns
+  // immediately so the user can queue up another type without waiting.
+  function generate() {
     if (!activeType) return;
-    const entry = NOTE_TYPES.find((t) => t.type === activeType)!;
-    setGenerating(true);
-    setStreamingNote("");
-    try {
-      const res = await fetch(entry.route(notebookId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topic,
-          // Only send when non-empty — the route treats absence as "all docs".
-          ...(selectedFilenames.length > 0 && { selectedFilenames }),
-        }),
-      });
+    const typeKey = activeType;
+    const entry = NOTE_TYPES.find((t) => t.type === typeKey)!;
 
-      if (!res.ok) return; // route returned an error before streaming started
+    // Mark this type as in-flight with an empty preview string.
+    setInFlight((prev) => new Map(prev).set(typeKey, ""));
+    // Snapshot topic now; clear UI immediately so the user can type a new one.
+    const capturedTopic = topic;
+    setTopic("");
+    setActiveType(null);
 
-      // Drain the SSE stream — append deltas to the preview, wait for done.
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+    // Run the stream in the background — no await at the call site.
+    void (async () => {
+      try {
+        const res = await fetch(entry.route(notebookId), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            topic: capturedTopic,
+            // Only send when non-empty — the route treats absence as "all docs".
+            ...(selectedFilenames.length > 0 && { selectedFilenames }),
+          }),
+        });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        if (!res.ok) return;
 
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
+        // Drain the SSE stream — append deltas to this type's preview slot.
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data:")) continue;
-          const payload = JSON.parse(line.slice(5).trim()) as {
-            type: string;
-            text?: string;
-          };
-          if (payload.type === "delta" && payload.text) {
-            setStreamingNote((prev) => prev + payload.text);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = JSON.parse(line.slice(5).trim()) as {
+              type: string;
+              text?: string;
+            };
+            if (payload.type === "delta" && payload.text) {
+              setInFlight((prev) => {
+                const next = new Map(prev);
+                next.set(typeKey, (next.get(typeKey) ?? "") + payload.text);
+                return next;
+              });
+            }
           }
-          // "done" event means the note is persisted — onCreated() will refresh the list.
         }
-      }
 
-      setTopic("");
-      setActiveType(null); // collapse the generate panel after success
-      onCreated();
-    } finally {
-      setGenerating(false);
-      setStreamingNote("");
-    }
+        onCreated();
+      } finally {
+        // Remove this type from the in-flight map whether it succeeded or failed.
+        setInFlight((prev) => {
+          const next = new Map(prev);
+          next.delete(typeKey);
+          return next;
+        });
+      }
+    })();
   }
 
   async function deleteNote(noteId: string) {
@@ -1190,10 +1206,12 @@ function StudioPanel({
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-3">
 
-        {/* Type-selector grid — 3 columns, each card is icon + label + chevron */}
+        {/* Type-selector grid — 3 columns, each card is icon + label + chevron.
+            A card with an active generation shows a spinner instead of the chevron. */}
         <div className="grid grid-cols-3 gap-2">
           {NOTE_TYPES.map(({ type, label, icon, color, activeColor }) => {
             const active = activeType === type;
+            const streaming = inFlight.has(type);
             return (
               <button
                 key={type}
@@ -1206,7 +1224,7 @@ function StudioPanel({
                   <span className="text-base leading-none">{icon}</span>
                   <span className="text-xs font-medium leading-none">{label}</span>
                 </div>
-                <span className="text-xs opacity-50">›</span>
+                {streaming ? <Spinner size="xs" /> : <span className="text-xs opacity-50">›</span>}
               </button>
             );
           })}
@@ -1222,35 +1240,39 @@ function StudioPanel({
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
               placeholder="Optional topic / focus"
-              disabled={generating}
-              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent disabled:opacity-50"
+              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent"
             />
             <button
               onClick={generate}
-              disabled={generating}
-              className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white"
             >
-              {generating && <Spinner size="sm" />}
-              {generating ? "Generating…" : "Generate"}
+              Generate
             </button>
-            {/* Live preview — shows content being written token-by-token while
-                generating. Disappears once the note is saved and the list refreshes. */}
-            {generating && (
-              <div className="mt-3 max-h-48 overflow-y-auto rounded-md border border-edge bg-ink p-2 text-xs text-zinc-300">
-                {streamingNote ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                    {fixMarkdown(streamingNote)}
-                  </ReactMarkdown>
-                ) : (
-                  <span className="flex items-center gap-2 text-muted">
-                    <Spinner size="xs" />
-                    Writing…
-                  </span>
-                )}
-              </div>
-            )}
           </div>
         )}
+
+        {/* In-flight previews — one per active generation, shown as live streams.
+            Each disappears once its stream completes and the note is saved. */}
+        {Array.from(inFlight.entries()).map(([type, partial]) => {
+          const meta = NOTE_TYPES.find((t) => t.type === type)!;
+          return (
+            <div key={type} className="mt-3 rounded-lg border border-edge bg-ink/40 p-3">
+              <div className="mb-2 flex items-center gap-2 text-xs font-medium text-muted">
+                <Spinner size="xs" />
+                {meta.icon} {meta.label} — generating…
+              </div>
+              <div className="max-h-48 overflow-y-auto rounded-md border border-edge bg-ink p-2 text-xs text-zinc-300">
+                {partial ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {fixMarkdown(partial)}
+                  </ReactMarkdown>
+                ) : (
+                  <span className="text-muted">Writing…</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
 
         {/* Notes list — all types unified, newest first */}
         <div className="mt-5 space-y-3">
@@ -1266,7 +1288,7 @@ function StudioPanel({
               />
             )
           )}
-          {notes.length === 0 && (
+          {notes.length === 0 && inFlight.size === 0 && (
             <p className="text-xs text-muted">No notes yet. Pick a type above to generate one.</p>
           )}
         </div>

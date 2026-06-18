@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation } from "@/lib/db";
-import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation } from "@/lib/openrag";
+import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -76,6 +76,18 @@ export async function GET(
           if (status !== "indexing") {
             db.prepare("UPDATE documents SET ingest_status = ?, ingest_error = ? WHERE id = ?")
               .run(status, error, doc.id);
+            // When a doc becomes ready, sync the filter so OpenRAG knows it exists.
+            // The POST handler schedules this too, but documents are always 'indexing'
+            // at upload time — so that sync produces an empty list. This is the
+            // call that actually adds the filename to data_sources.
+            if (status === "ready" && notebook.openrag_filter_id) {
+              scheduleSyncFilterSources(notebook.openrag_filter_id, () =>
+                (db
+                  .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
+                  .all(id) as { filename: string }[]
+                ).map((r) => r.filename)
+              );
+            }
           }
         } catch {
           // OpenRAG unreachable — leave status as 'indexing', retry next poll.

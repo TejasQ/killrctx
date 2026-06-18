@@ -128,21 +128,30 @@ export async function POST(
 
         let assembled = "";
         let responseId = "";
+        // Collected once per response — the SourcesEvent fires before "done".
+        let sourcesJson: string | null = null;
 
         for await (const event of events) {
           if (event.type === "content") {
             assembled += event.delta;
             send({ type: "delta", text: event.delta });
+          } else if (event.type === "sources") {
+            // Forward source citations to the client so the UI can render a
+            // sources footer below the assistant message. Each Source carries
+            // filename, text (the retrieved chunk), score, page, and mimetype.
+            send({ type: "sources", sources: event.sources });
+            // Persist so citations survive navigation and page refresh.
+            sourcesJson = JSON.stringify(event.sources);
           } else if (event.type === "done") {
             responseId = event.chatId ?? "";
           }
-          // "sources" events are ignored — we don't surface sources in the UI yet.
         }
 
-        // Persist the completed assistant turn to SQLite.
+        // Persist the completed assistant turn to SQLite, including any
+        // source citations so they reload with the conversation history.
         db.prepare(
-          "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ).run(uuid(), id, conversationId, "assistant", assembled, responseId, Date.now());
+          "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, sources_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(uuid(), id, conversationId, "assistant", assembled, responseId, sourcesJson, Date.now());
 
         console.log("[openrag] chat.stream ← responseId:", responseId, "  responseLength:", assembled.length);
 

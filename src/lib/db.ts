@@ -78,6 +78,7 @@ export type Message = {
   role: "user" | "assistant";
   content: string;
   response_id: string | null; // OpenRAG response ID — chains turns into a thread
+  sources_json: string | null; // JSON-serialised Source[] from OpenRAG SourcesEvent; null for user messages and pre-feature rows
   created_at: number;
 };
 
@@ -143,6 +144,11 @@ function getDb(): Database.Database {
     // back-fill block below assigns them to a default conversation per notebook.
     if (cols.length > 0 && !cols.some((c) => c.name === "conversation_id")) {
       conn.exec("ALTER TABLE messages ADD COLUMN conversation_id TEXT");
+    }
+    // Add sources_json to messages. NULL for all existing rows — citations only
+    // appear on turns streamed after this migration runs.
+    if (cols.length > 0 && !cols.some((c) => c.name === "sources_json")) {
+      conn.exec("ALTER TABLE messages ADD COLUMN sources_json TEXT");
     }
   } catch {
     // Table doesn't exist yet — the CREATE TABLE below will create it with
@@ -246,6 +252,7 @@ function getDb(): Database.Database {
       role            TEXT NOT NULL,
       content         TEXT NOT NULL,
       response_id     TEXT,
+      sources_json    TEXT,
       created_at      INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );

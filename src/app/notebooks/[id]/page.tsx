@@ -40,13 +40,15 @@ import Spinner from "@/components/Spinner";
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
 import ModelPickerPopover from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
+import SourceCitation from "@/components/SourceCitation";
+import type { Source } from "openrag-sdk";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
 type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null };
 type Document = { id: string; filename: string; bytes: number; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
-type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string };
+type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string; sources_json: string | null };
 type Note = {
   id: string;
   type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
@@ -654,12 +656,37 @@ function SourcesPanel({
 // and task lists (GitHub Flavored Markdown).
 // ============================================================================
 
+// Group all chunks by filename, sorted by score descending within each file.
+// Returns a stable-ordered array of [filename, chunks[]] pairs so SourceCitation
+// can render one pill per file showing all retrieved passages on expand.
+function groupSourcesByFile(sources: Source[]): [string, Source[]][] {
+  const grouped = new Map<string, Source[]>();
+  for (const s of sources) {
+    const existing = grouped.get(s.filename);
+    if (existing) existing.push(s);
+    else grouped.set(s.filename, [s]);
+  }
+  // Sort chunks within each file by score descending so the best passage leads.
+  for (const chunks of grouped.values()) {
+    chunks.sort((a, b) => b.score - a.score);
+  }
+  return Array.from(grouped.entries());
+}
+
 // The LLM sometimes emits blank lines between table rows, which breaks GFM
 // table parsing — the parser sees the blank line as ending the block and falls
 // back to rendering raw pipe characters. This strips those spurious blank lines
 // so the table is contiguous and parses correctly.
 function fixMarkdown(raw: string): string {
-  return raw.replace(/(\|[^\n]*\n)\n+(?=\|)/g, "$1");
+  return raw
+    // Strip "(Source: ...)" lines the LLM agent emits when narrating its tool calls.
+    .replace(/\(Source:[^)]*\)/g, "")
+    // Strip {"search_query": "..."} JSON blobs the agent emits inline.
+    .replace(/\{"search_query":\s*"[^"]*"\}/g, "")
+    // Collapse any blank lines left behind by the stripping above.
+    .replace(/\n{3,}/g, "\n\n")
+    // Remove table-row blank lines that break react-markdown's GFM table parser.
+    .replace(/(\|[^\n]*\n)\n+(?=\|)/g, "$1");
 }
 
 const markdownComponents: Components = {
@@ -754,12 +781,63 @@ function ChatPanel({
   // transcript while sending=true; cleared and replaced by a real message row
   // from SQLite once the stream ends and onSent() triggers a refresh.
   const [streamingText, setStreamingText] = useState("");
+  // Sources keyed by message ID. The special key "streaming" holds sources for
+  // the in-flight reply so they show during streaming. After onSent() triggers
+  // a refresh, pendingSourcesRef carries the sources across the async gap and
+  // a useEffect re-keys them to the real SQLite message ID.
+  const [messageSources, setMessageSources] = useState<Map<string, Source[]>>(new Map());
+  // Holds the sources for the most recent stream until the real message ID is known.
+  const pendingSourcesRef = useRef<Source[] | null>(null);
   const [creatingConv, setCreatingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Only show messages for the active conversation.
   const visibleMessages = messages.filter((m) => m.conversation_id === activeConvId);
+
+  // Seed messageSources from persisted sources_json on every messages refresh.
+  // This covers: initial load, conversation switch, and post-send refresh.
+  // We only update entries that aren't already in state so we don't clobber
+  // sources that just arrived via the live streaming path.
+  useEffect(() => {
+    const toAdd: [string, Source[]][] = [];
+    for (const m of messages) {
+      if (m.role === "assistant" && m.sources_json) {
+        try {
+          toAdd.push([m.id, JSON.parse(m.sources_json) as Source[]]);
+        } catch {
+          // Malformed JSON — skip silently.
+        }
+      }
+    }
+    if (toAdd.length === 0) return;
+    setMessageSources((prev) => {
+      // Only add entries that aren't already present — the streaming path may
+      // have already set the entry for the most recent message.
+      const next = new Map(prev);
+      for (const [id, sources] of toAdd) {
+        if (!next.has(id)) next.set(id, sources);
+      }
+      return next;
+    });
+  }, [messages]);
+
+  // After onSent() refreshes the message list, the real assistant message row
+  // arrives with its SQLite ID. Re-key the pending sources from "streaming" to
+  // that ID so they survive the streaming→stored transition.
+  useEffect(() => {
+    if (!pendingSourcesRef.current) return;
+    const lastAssistant = [...visibleMessages].reverse().find((m) => m.role === "assistant");
+    if (!lastAssistant) return;
+    const sources = pendingSourcesRef.current;
+    pendingSourcesRef.current = null;
+    setMessageSources((prev) => {
+      const next = new Map(prev);
+      next.delete("streaming");
+      next.set(lastAssistant.id, sources);
+      return next;
+    });
+  }, [visibleMessages]);
 
   // Auto-scroll to the bottom whenever the visible message list or streaming
   // text changes — keeps the latest tokens in view as they arrive.
@@ -773,6 +851,8 @@ function ChatPanel({
     setSending(true);
     setStreamingText("");
     setError(null);
+    // Clear previous turn's streaming sources so they don't show on the new bubble.
+    setMessageSources((prev) => { const m = new Map(prev); m.delete("streaming"); return m; });
     const sentInput = input;
     setInput("");
 
@@ -814,10 +894,17 @@ function ChatPanel({
             text?: string;
             conversationTitle?: string;
             error?: string;
+            sources?: Source[];
           };
 
           if (payload.type === "delta" && payload.text) {
             setStreamingText((prev) => prev + payload.text);
+          } else if (payload.type === "sources" && Array.isArray(payload.sources)) {
+            const sources = payload.sources as Source[];
+            // Store in ref so we can re-key to the real message ID after refresh.
+            pendingSourcesRef.current = sources;
+            // Also set "streaming" key so the footer shows during live streaming.
+            setMessageSources((prev) => new Map(prev).set("streaming", sources));
           } else if (payload.type === "done") {
             if (payload.conversationTitle && activeConvId) {
               onConvRenamed(activeConvId, payload.conversationTitle);
@@ -928,6 +1015,9 @@ function ChatPanel({
                       {fixMarkdown(m.content)}
                     </ReactMarkdown>
                   )}
+                  {m.role === "assistant" && messageSources.get(m.id) && (
+                    <SourceCitation sources={messageSources.get(m.id)!} />
+                  )}
                 </div>
               </li>
             ))}
@@ -949,6 +1039,9 @@ function ChatPanel({
                       <Spinner size="xs" />
                       Thinking…
                     </span>
+                  )}
+                  {messageSources.get("streaming") && (
+                    <SourceCitation sources={messageSources.get("streaming")!} />
                   )}
                 </div>
               </li>

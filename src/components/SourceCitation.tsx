@@ -49,7 +49,7 @@ function SourcePill({ filename, chunks }: { filename: string; chunks: Source[] }
     <div>
       <button
         onClick={() => setOpen((o) => !o)}
-        title={`best relevance: ${best.score.toFixed(2)} — click to ${open ? "hide" : "show"} ${chunks.length === 1 ? "passage" : `${chunks.length} passages`}`}
+        title={`click to ${open ? "hide" : "show"} ${chunks.length === 1 ? "passage" : `${chunks.length} passages`}`}
         className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[11px] transition-colors
           ${open
             ? "border-accent/40 bg-accent/10 text-accent"
@@ -72,10 +72,9 @@ function SourcePill({ filename, chunks }: { filename: string; chunks: Source[] }
               className="rounded border border-edge bg-ink/60 px-3 py-2 text-[11px] leading-relaxed text-muted"
             >
               {/* Passage header: score + page if available */}
-              <div className="mb-1 flex items-center gap-2 text-[10px] text-muted/50">
-                <span>score {chunk.score.toFixed(2)}</span>
-                {chunk.page != null && <span>· p.{chunk.page}</span>}
-              </div>
+              {chunk.page != null && (
+                <div className="mb-1 text-[10px] text-muted/50">p.{chunk.page}</div>
+              )}
               <div className="whitespace-pre-wrap">{chunk.text}</div>
             </div>
           ))}

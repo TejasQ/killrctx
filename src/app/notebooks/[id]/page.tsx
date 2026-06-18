@@ -683,6 +683,8 @@ function fixMarkdown(raw: string): string {
     .replace(/\(Source:[^)]*\)/g, "")
     // Strip {"search_query": "..."} JSON blobs the agent emits inline.
     .replace(/\{"search_query":\s*"[^"]*"\}/g, "")
+    // Strip {"expression": "..."} JSON blobs the agent emits inline.
+    .replace(/\{"expression":\s*"[^"]*"\}/g, "")
     // Collapse any blank lines left behind by the stripping above.
     .replace(/\n{3,}/g, "\n\n")
     // Remove table-row blank lines that break react-markdown's GFM table parser.
@@ -1477,7 +1479,7 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
       {expanded && note.content && (
         <div className="border-t border-edge px-3 py-2 text-sm">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-            {note.content}
+            {fixMarkdown(note.content)}
           </ReactMarkdown>
         </div>
       )}

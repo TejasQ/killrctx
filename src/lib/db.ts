@@ -337,13 +337,12 @@ export type QueryConfig = {
  * caller sends no inline filter (the filterId alone applies).
  */
 export function buildQueryConfig(
-  notebookId: string,
   notebook: Notebook,
   selectedFilenames?: string[],
 ): QueryConfig {
   const readyDocs = getDb()
     .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
-    .all(notebookId) as { filename: string }[];
+    .all(notebook.id) as { filename: string }[];
 
   const sourcePaths: string[] | null =
     readyDocs.length === 0

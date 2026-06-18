@@ -112,9 +112,11 @@ export async function POST(
     .get(id) as { openrag_filter_id: string | null } | undefined;
   if (freshNotebook?.openrag_filter_id) {
     const filterId = freshNotebook.openrag_filter_id;
+    // Only sync ready docs — passing indexing/failed filenames into data_sources
+    // would tell OpenRAG to retrieve from documents it hasn't embedded yet.
     scheduleSyncFilterSources(filterId, () =>
       (db
-        .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+        .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
         .all(id) as { filename: string }[]
       ).map((r) => r.filename)
     );

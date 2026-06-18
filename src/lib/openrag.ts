@@ -259,16 +259,6 @@ export async function deleteFilter(filterId: string): Promise<void> {
 }
 
 /**
- * Fetch the icon and color a user has set for a filter in the OpenRAG UI.
- *
- * These are not set by us at creation time (`createFilter` produces
- * `icon: undefined, color: undefined`). Users set them in the OpenRAG filter
- * editor. We poll on each GET /api/notebooks/[id] and cache in SQLite so the
- * FilterBadge can match OpenRAG's own visual exactly.
- *
- * Returns null if the filter is not found or OpenRAG is unreachable.
- */
-/**
  * Update the icon and color of a knowledge filter in OpenRAG.
  *
  * We spread the existing queryData and override only icon+color so the

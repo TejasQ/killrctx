@@ -113,7 +113,7 @@ export async function POST(
     updatedTitle = titleFromContent;
   }
 
-  const qc = buildQueryConfig(id, notebook, selectedFilenames);
+  const qc = buildQueryConfig(notebook, selectedFilenames);
 
   // When a filter is active the OpenRAG agent retrieves automatically — no
   // prompt wrapping needed. Light nudge only for the no-filter fallback path.

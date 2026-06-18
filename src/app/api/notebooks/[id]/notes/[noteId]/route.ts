@@ -70,7 +70,7 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const qc = buildQueryConfig(id, notebook, selectedFilenames);
+  const qc = buildQueryConfig(notebook, selectedFilenames);
   const { content, responseId } = await generateNote({ type: noteType, topic, ...qc });
 
   const now = Date.now();

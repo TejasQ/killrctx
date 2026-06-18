@@ -68,7 +68,7 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const qc = buildQueryConfig(id, notebook, selectedFilenames);
+  const qc = buildQueryConfig(notebook, selectedFilenames);
 
   const podcastId = uuid();
   const now = Date.now();

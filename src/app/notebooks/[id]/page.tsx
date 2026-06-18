@@ -750,6 +750,10 @@ function ChatPanel({
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // Streaming assistant reply being built token-by-token. Shown live in the
+  // transcript while sending=true; cleared and replaced by a real message row
+  // from SQLite once the stream ends and onSent() triggers a refresh.
+  const [streamingText, setStreamingText] = useState("");
   const [creatingConv, setCreatingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -757,22 +761,27 @@ function ChatPanel({
   // Only show messages for the active conversation.
   const visibleMessages = messages.filter((m) => m.conversation_id === activeConvId);
 
-  // Auto-scroll to the bottom whenever the visible message list changes.
+  // Auto-scroll to the bottom whenever the visible message list or streaming
+  // text changes — keeps the latest tokens in view as they arrive.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [visibleMessages]);
+  }, [visibleMessages, streamingText]);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     if (!input.trim() || !activeConvId) return;
     setSending(true);
+    setStreamingText("");
     setError(null);
+    const sentInput = input;
+    setInput("");
+
     try {
       const res = await fetch(`/api/notebooks/${notebookId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          content: input,
+          content: sentInput,
           conversationId: activeConvId,
           // Only send when non-empty — the route treats absence as "all docs".
           ...(selectedFilenames.length > 0 && { selectedFilenames }),
@@ -782,18 +791,49 @@ function ChatPanel({
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? `chat failed (${res.status})`);
       }
-      const data = await res.json();
-      // On the first message the server renames the conversation to match
-      // what OpenRAG will show — update the switcher label immediately.
-      if (data.conversationTitle && activeConvId) {
-        onConvRenamed(activeConvId, data.conversationTitle);
+
+      // Read the SSE stream line by line, appending each delta to streamingText.
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE lines are terminated by \n\n — process all complete events.
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = JSON.parse(line.slice(5).trim()) as {
+            type: string;
+            text?: string;
+            conversationTitle?: string;
+            error?: string;
+          };
+
+          if (payload.type === "delta" && payload.text) {
+            setStreamingText((prev) => prev + payload.text);
+          } else if (payload.type === "done") {
+            if (payload.conversationTitle && activeConvId) {
+              onConvRenamed(activeConvId, payload.conversationTitle);
+            }
+          } else if (payload.type === "error") {
+            throw new Error(payload.error ?? "chat failed");
+          }
+        }
       }
-      setInput("");
-      onSent();
+
+      onSent(); // triggers refresh — replaces streamingText with the real message row
     } catch (e) {
       setError(e instanceof Error ? e.message : "chat failed");
     } finally {
       setSending(false);
+      setStreamingText("");
     }
   }
 
@@ -891,10 +931,26 @@ function ChatPanel({
                 </div>
               </li>
             ))}
+            {/* Show the streaming reply live as tokens arrive. Once sending
+                ends, onSent() triggers a refresh that loads the real message row
+                from SQLite and this placeholder disappears. */}
             {sending && (
-              <li className="flex items-center gap-2 text-xs text-muted">
-                <Spinner size="xs" />
-                Notebook is thinking…
+              <li className="text-sm leading-relaxed">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
+                  Notebook
+                </div>
+                <div className="rounded-lg border border-edge bg-panel px-4 py-3">
+                  {streamingText ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                      {fixMarkdown(streamingText)}
+                    </ReactMarkdown>
+                  ) : (
+                    <span className="flex items-center gap-2 text-xs text-muted">
+                      <Spinner size="xs" />
+                      Thinking…
+                    </span>
+                  )}
+                </div>
               </li>
             )}
           </ul>
@@ -978,6 +1034,9 @@ function StudioPanel({
   const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
   const [topic, setTopic] = useState("");
   const [generating, setGenerating] = useState(false);
+  // Streaming note content being built token-by-token while generating=true.
+  // Shown as a live preview; replaced by the real note card once generation ends.
+  const [streamingNote, setStreamingNote] = useState("");
   // ID of the note currently open in full reading view (null = list view).
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -990,8 +1049,9 @@ function StudioPanel({
     if (!activeType) return;
     const entry = NOTE_TYPES.find((t) => t.type === activeType)!;
     setGenerating(true);
+    setStreamingNote("");
     try {
-      await fetch(entry.route(notebookId), {
+      const res = await fetch(entry.route(notebookId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1000,11 +1060,42 @@ function StudioPanel({
           ...(selectedFilenames.length > 0 && { selectedFilenames }),
         }),
       });
+
+      if (!res.ok) return; // route returned an error before streaming started
+
+      // Drain the SSE stream — append deltas to the preview, wait for done.
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = JSON.parse(line.slice(5).trim()) as {
+            type: string;
+            text?: string;
+          };
+          if (payload.type === "delta" && payload.text) {
+            setStreamingNote((prev) => prev + payload.text);
+          }
+          // "done" event means the note is persisted — onCreated() will refresh the list.
+        }
+      }
+
       setTopic("");
       setActiveType(null); // collapse the generate panel after success
       onCreated();
     } finally {
       setGenerating(false);
+      setStreamingNote("");
     }
   }
 
@@ -1131,7 +1222,8 @@ function StudioPanel({
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
               placeholder="Optional topic / focus"
-              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent"
+              disabled={generating}
+              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent disabled:opacity-50"
             />
             <button
               onClick={generate}
@@ -1141,6 +1233,22 @@ function StudioPanel({
               {generating && <Spinner size="sm" />}
               {generating ? "Generating…" : "Generate"}
             </button>
+            {/* Live preview — shows content being written token-by-token while
+                generating. Disappears once the note is saved and the list refreshes. */}
+            {generating && (
+              <div className="mt-3 max-h-48 overflow-y-auto rounded-md border border-edge bg-ink p-2 text-xs text-zinc-300">
+                {streamingNote ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                    {fixMarkdown(streamingNote)}
+                  </ReactMarkdown>
+                ) : (
+                  <span className="flex items-center gap-2 text-muted">
+                    <Spinner size="xs" />
+                    Writing…
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 

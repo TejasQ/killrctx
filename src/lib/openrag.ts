@@ -11,7 +11,8 @@
 // All communication goes through the official `openrag-sdk` client. Seven
 // in-app CRUD operations are covered here:
 //
-//   client.chat.create()                 — send a prompt, get a grounded answer
+//   client.chat.create()                 — send a prompt, get a grounded answer (non-streaming)
+//   client.chat.stream()                 — send a prompt, stream token deltas as they arrive
 //   client.chat.delete(chatId)           — remove a conversation thread from OpenRAG
 //   client.documents.ingest()            — push a file through Docling → embed → index
 //   client.documents.delete()            — remove all chunks for a filename
@@ -50,7 +51,7 @@
 // edits are picked up on the next request without restarting `next dev`.
 // ============================================================================
 
-import { OpenRAGClient, type IngestResponse } from "openrag-sdk";
+import { OpenRAGClient, type IngestResponse, type StreamEvent } from "openrag-sdk";
 
 // ============================================================================
 // Debounced filter sync — prevents race conditions on concurrent uploads.
@@ -167,6 +168,39 @@ export async function chat(args: {
   const r = await getClient().chat.create(params);
   console.log("[openrag] chat.create ← responseId:", r.chatId, "  responseLength:", r.response?.length);
   return { response: r.response, responseId: r.chatId ?? "" };
+}
+
+/**
+ * Same as chat() but yields token deltas as they arrive from OpenRAG.
+ *
+ * Returns an AsyncIterable of SDK StreamEvents. The caller is responsible
+ * for draining the iterable — the final DoneEvent carries the chatId needed
+ * to continue the thread on the next turn.
+ *
+ * Used by the streaming API routes for chat and note generation so the UI
+ * can render tokens live instead of waiting for the complete response.
+ */
+export function chatStream(args: {
+  prompt: string;
+  previousResponseId?: string | null;
+  filterId?: string | null;
+  sourcePaths?: string[] | null;
+  limit?: number | null;
+  scoreThreshold?: number | null;
+}): Promise<AsyncIterable<StreamEvent>> {
+  const params = {
+    message: args.prompt,
+    chatId: args.previousResponseId ?? undefined,
+    filterId: args.filterId ?? undefined,
+    filters: args.sourcePaths?.length
+      ? { data_sources: args.sourcePaths }
+      : undefined,
+    limit: args.limit ?? 8,
+    scoreThreshold: args.scoreThreshold ?? undefined,
+  };
+  console.log("[openrag] chat.stream →", JSON.stringify(params, null, 2));
+  // client.chat.stream() returns a ChatStream which is an AsyncIterable<StreamEvent>.
+  return getClient().chat.stream(params);
 }
 
 /**
@@ -361,53 +395,6 @@ export async function probeSettings(): Promise<{ llm: string; embedding: string 
   const llm = `${s.agent.llm_provider ?? "?"}/${s.agent.llm_model ?? "?"}`;
   const embedding = `${s.knowledge.embedding_provider ?? "?"}/${s.knowledge.embedding_model ?? "?"}`;
   return { llm, embedding };
-}
-
-const NOTE_PROMPTS: Record<string, string> = {
-  summary:
-    "Write a concise prose summary of the key information in the sources. " +
-    "Focus on the most important facts, themes, and conclusions.",
-  mindmap:
-    "Create a hierarchical mind map of the key concepts in the sources. " +
-    "Use nested markdown lists (- item, indent child items with two spaces). " +
-    "Do not use any other formatting.",
-  outline:
-    "Write a structured outline of the topics covered in the sources. " +
-    "Use markdown headings (##, ###) and numbered lists.",
-  qa:
-    "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
-    "Format each pair as:\n**Q: ...?**\nA: ...",
-};
-
-/**
- * Ask OpenRAG to generate a text-based note from the indexed sources.
- *
- * Each note type has its own prompt; the optional `topic` narrows the focus.
- * Returns both the markdown content and the OpenRAG responseId so the caller
- * (the API route) can persist it — the responseId is needed later to clean up
- * the OpenRAG thread when the note is deleted.
- * Uses limit:12 for broader retrieval coverage, same as the podcast script draft.
- */
-export async function generateNote(args: {
-  type: "summary" | "mindmap" | "outline" | "qa";
-  topic?: string;
-  filterId?: string | null;
-  sourcePaths?: string[] | null;
-  limit?: number | null;
-  scoreThreshold?: number | null;
-}): Promise<{ content: string; responseId: string }> {
-  const base = NOTE_PROMPTS[args.type];
-  const prompt = args.topic ? `${base} Focus on: ${args.topic}.` : base;
-  // Use the filter's configured limit when available; notes default to 12
-  // (vs chat's 8) for broader retrieval coverage over the full document set.
-  const { response, responseId } = await chat({
-    prompt,
-    filterId: args.filterId,
-    sourcePaths: args.sourcePaths,
-    limit: args.limit ?? 12,
-    scoreThreshold: args.scoreThreshold,
-  });
-  return { content: response, responseId };
 }
 
 export type ModelOption = { value: string; label: string; default: boolean };

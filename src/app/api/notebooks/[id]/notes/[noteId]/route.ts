@@ -5,7 +5,7 @@
 // _Basically_, this one route handles two operations distinguished by HTTP
 // method:
 //
-//   POST   /api/notebooks/[id]/notes/[type]   — generate a new note
+//   POST   /api/notebooks/[id]/notes/[type]   — generate a new note (streaming)
 //   DELETE /api/notebooks/[id]/notes/[noteId] — delete an existing note
 //
 // Next.js requires a single slug name for all dynamic segments at the same
@@ -14,18 +14,20 @@
 // as a row ID. They never collide because note IDs are UUIDs and type names
 // are short lowercase words.
 //
-// All note types (summary, mindmap, outline, qa) go through the same
-// generate path — same OpenRAG query setup via buildQueryConfig, same
-// generateNote() call. The only thing that differs is the `type` string,
-// which selects the prompt inside generateNote(). Podcast is a separate route
-// because it has a multi-step async pipeline (script → TTS → stitch) that
-// can't fit the synchronous generate-and-return pattern here.
+// The POST handler streams token deltas back as SSE so the UI can show the
+// note being written in real time. Once streaming is complete, the assembled
+// content is saved to SQLite and a final SSE event returns the saved note row.
+//
+// SSE event format (newline-delimited JSON in the `data:` field):
+//   data: {"type":"delta","text":"hello"}
+//   data: {"type":"done","note":{...}}   ← full saved note row
+//   data: {"type":"error","error":"…"}
 // ============================================================================
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
-import { generateNote, deleteConversation } from "@/lib/openrag";
+import { chatStream, deleteConversation } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
@@ -39,12 +41,30 @@ const DEFAULT_TITLES: Record<NoteType, (date: string) => string> = {
   qa:      (d) => `Q&A ${d}`,
 };
 
+// Each note type has a dedicated prompt. The optional `topic` narrows focus.
+const NOTE_PROMPTS: Record<NoteType, string> = {
+  summary:
+    "Write a concise prose summary of the key information in the sources. " +
+    "Focus on the most important facts, themes, and conclusions.",
+  mindmap:
+    "Create a hierarchical mind map of the key concepts in the sources. " +
+    "Use nested markdown lists (- item, indent child items with two spaces). " +
+    "Do not use any other formatting.",
+  outline:
+    "Write a structured outline of the topics covered in the sources. " +
+    "Use markdown headings (##, ###) and numbered lists.",
+  qa:
+    "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
+    "Format each pair as:\n**Q: ...?**\nA: ...",
+};
+
 /**
  * POST /api/notebooks/[id]/notes/[type]
  *
  * Body: { topic?: string; title?: string; selectedFilenames?: string[] }
  *
- * Generates a new text note of the given type and returns the saved row.
+ * Streams token deltas, then emits a final "done" event containing the
+ * persisted note row so the UI can add it to the notes list.
  */
 export async function POST(
   req: NextRequest,
@@ -53,7 +73,7 @@ export async function POST(
   const { id, noteId: type } = await ctx.params;
 
   if (!NOTE_TYPES.includes(type as NoteType)) {
-    return NextResponse.json({ error: `unknown note type: ${type}` }, { status: 400 });
+    return new Response(JSON.stringify({ error: `unknown note type: ${type}` }), { status: 400 });
   }
   const noteType = type as NoteType;
 
@@ -67,20 +87,67 @@ export async function POST(
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook | undefined;
   if (!notebook) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
   }
 
   const qc = buildQueryConfig(notebook, selectedFilenames);
-  const { content, responseId } = await generateNote({ type: noteType, topic, ...qc });
+  const base = NOTE_PROMPTS[noteType];
+  const prompt = topic ? `${base} Focus on: ${topic}.` : base;
 
-  const now = Date.now();
-  const noteId = uuid();
-  db.prepare(
-    "INSERT INTO notes (id, notebook_id, type, title, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(noteId, id, noteType, title?.trim() || DEFAULT_TITLES[noteType](new Date(now).toLocaleDateString()), content, responseId, now);
+  const stream = new ReadableStream({
+    async start(controller) {
+      function send(obj: Record<string, unknown>) {
+        controller.enqueue(`data: ${JSON.stringify(obj)}\n\n`);
+      }
 
-  const note = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId) as Note;
-  return NextResponse.json({ note });
+      try {
+        // Notes use limit:12 for broader retrieval coverage over the full doc set.
+        const events = await chatStream({ prompt, ...qc, limit: qc.limit ?? 12 });
+
+        let assembled = "";
+        let responseId = "";
+
+        for await (const event of events) {
+          if (event.type === "content") {
+            assembled += event.delta;
+            send({ type: "delta", text: event.delta });
+          } else if (event.type === "done") {
+            responseId = event.chatId ?? "";
+          }
+        }
+
+        // Persist the note to SQLite once streaming is complete.
+        const now = Date.now();
+        const noteId = uuid();
+        db.prepare(
+          "INSERT INTO notes (id, notebook_id, type, title, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+          noteId,
+          id,
+          noteType,
+          title?.trim() || DEFAULT_TITLES[noteType](new Date(now).toLocaleDateString()),
+          assembled,
+          responseId,
+          now,
+        );
+
+        const note = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId) as Note;
+        send({ type: "done", note });
+      } catch (err) {
+        send({ type: "error", error: err instanceof Error ? err.message : "note generation failed" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
 
 /**
@@ -96,15 +163,12 @@ export async function DELETE(
 
   const note = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId) as Note | undefined;
   if (!note) {
-    return NextResponse.json({ ok: true }); // already gone — idempotent
+    return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } }); // already gone — idempotent
   }
 
   db.prepare("DELETE FROM notes WHERE id = ?").run(noteId);
 
-  // Clean up the OpenRAG thread best-effort. All note types — including
-  // podcasts — store a response_id from their generating chat() call.
-  // The check handles the edge case of notes created before this was added,
-  // or where OpenRAG was unreachable during generation.
+  // Clean up the OpenRAG thread best-effort.
   if (note.response_id) {
     try {
       await deleteConversation(note.response_id);
@@ -113,5 +177,5 @@ export async function DELETE(
     }
   }
 
-  return NextResponse.json({ ok: true });
+  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
 }

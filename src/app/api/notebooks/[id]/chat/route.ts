@@ -1,42 +1,43 @@
 // ============================================================================
-// /api/notebooks/[id]/chat — send a message, get an answer
+// /api/notebooks/[id]/chat — send a message, stream the answer back
 // ============================================================================
 //
-// _Basically_, the chat panel POSTs `{ content }` here. We:
-//   1. Save the user turn so the UI re-renders it immediately on next refresh.
-//   2. If this is the first message in the conversation, rename it to the
-//      first 50 chars of the user's raw content — so our switcher title
-//      matches what OpenRAG shows on their side (OpenRAG titles threads from
-//      the first message it receives; ours should agree).
-//   3. Look up the last assistant `response_id` so OpenRAG can thread the
-//      conversation (no need to resend the full history).
-//   4. Send the prompt. When a knowledge filter is active (the normal case),
-//      the user's message goes as-is — the filter tells OpenRAG's agent which
-//      documents to search, so no extra wrapping is needed or wanted.
-//   5. Call OpenRAG, save the assistant turn with its response_id, return
-//      the answer (plus the updated conversation title if it changed).
+// _Basically_, the chat panel POSTs `{ content }` here and we stream the
+// OpenRAG response back as Server-Sent Events so tokens appear as they
+// arrive — no waiting for the full response before rendering begins.
 //
-// Why we stopped wrapping the prompt:
-//   We used to prepend "Use the OpenSearch Retrieval tool…Do NOT use general
-//   knowledge" to every message. That worked before filters existed, but once
-//   a filterId is in play the OpenRAG agent retrieves automatically. The hard
-//   constraint caused the agent to refuse ("No relevant sources found") when
-//   its internal confidence was below its own threshold — even when it had
-//   relevant docs. Lesson: don't fight the agent when the filter is doing its
-//   job. A light nudge is kept only for the rare no-filter fallback path.
+// Flow:
+//   1. Validate the request and look up the notebook + conversation.
+//   2. Persist the user turn immediately (so it survives even if streaming fails).
+//   3. Rename the conversation on the first message (same as before).
+//   4. Open a streaming chat call to OpenRAG via chatStream().
+//   5. Forward each "content" delta as an SSE `data` line.
+//   6. On "done", persist the assembled assistant turn to SQLite and send a
+//      final SSE event carrying the conversationTitle (if this was turn 1).
+//   7. Close the stream.
+//
+// SSE event format (newline-delimited JSON in the `data:` field):
+//   data: {"type":"delta","text":"hello"}
+//   data: {"type":"done","conversationTitle":"…"}   ← only on first turn
+//   data: {"type":"error","error":"…"}              ← on OpenRAG failure
+//
+// Why not a regular JSON response?
+//   The chat route used to await the full OpenRAG response (~5–20 s for long
+//   answers) before sending anything. Streaming lets the UI render tokens
+//   live, which feels much faster even when total latency is unchanged.
 // ============================================================================
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook, Message, buildQueryConfig } from "@/lib/db";
-import { chat } from "@/lib/openrag";
+import { chatStream } from "@/lib/openrag";
 
 export const runtime = "nodejs";
 
 /**
  * POST /api/notebooks/[id]/chat
- * Body: { content: string; conversationId: string }
- * Response: { answer: string } | { error: string } (502 on backend failure)
+ * Body: { content: string; conversationId: string; selectedFilenames?: string[] }
+ * Response: text/event-stream — SSE deltas then a final "done" or "error" event
  */
 export async function POST(
   req: NextRequest,
@@ -46,37 +47,30 @@ export async function POST(
   const { content, conversationId, selectedFilenames } = (await req.json()) as {
     content?: string;
     conversationId?: string;
-    /** Filenames the user has checked in the Sources panel. When present,
-     *  scope retrieval to only those files. When absent, use all ready docs. */
     selectedFilenames?: string[];
   };
+
   if (!content?.trim()) {
-    return NextResponse.json({ error: "empty" }, { status: 400 });
+    return new Response(JSON.stringify({ error: "empty" }), { status: 400 });
   }
   if (!conversationId?.trim()) {
-    return NextResponse.json({ error: "conversationId is required" }, { status: 400 });
+    return new Response(JSON.stringify({ error: "conversationId is required" }), { status: 400 });
   }
 
   const notebook = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook | undefined;
   if (!notebook) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
+    return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
   }
 
-  // Guard: verify the conversation belongs to this notebook so a caller
-  // can't insert messages or rename conversations in a different notebook.
   const conversation = db
     .prepare("SELECT id FROM conversations WHERE id = ? AND notebook_id = ?")
     .get(conversationId, id);
   if (!conversation) {
-    return NextResponse.json({ error: "conversation not found" }, { status: 404 });
+    return new Response(JSON.stringify({ error: "conversation not found" }), { status: 404 });
   }
 
-  // Find the most recent assistant turn *in this conversation* with a
-  // response_id — that's what we hand to OpenRAG to continue the thread.
-  // Scoping to conversation_id means two conversations in the same notebook
-  // each have independent OpenRAG threading.
   const lastAssistant = db
     .prepare(
       `SELECT response_id FROM messages
@@ -86,17 +80,13 @@ export async function POST(
     )
     .get(id, conversationId) as Pick<Message, "response_id"> | undefined;
 
-  // Persist the user turn first so even if the OpenRAG call fails, the user
-  // sees their own message in the transcript. (We could move this after the
-  // success-path to keep transcripts "clean", but feedback wins.)
+  // Persist the user turn before streaming starts — even if the stream fails
+  // the user sees their own message in the transcript.
   db.prepare(
     "INSERT INTO messages (id, notebook_id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(uuid(), id, conversationId, "user", content, Date.now());
 
-  // If this is the first message in the conversation, rename it from the
-  // auto-generated "Conversation N" to the first 50 chars of the user's raw
-  // content. We check for exactly 1 message (the one we just inserted).
-  // `updatedTitle` is returned to the client so the switcher updates live.
+  // On the first message, rename the conversation to the first 50 chars of content.
   const msgCount = (
     db
       .prepare("SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ?")
@@ -115,38 +105,62 @@ export async function POST(
 
   const qc = buildQueryConfig(notebook, selectedFilenames);
 
-  // When a filter is active the OpenRAG agent retrieves automatically — no
-  // prompt wrapping needed. Light nudge only for the no-filter fallback path.
+  // Light nudge only for the no-filter fallback path — same logic as before.
   const grounded =
     !qc.filterId && qc.sourcePaths
       ? `Search the uploaded documents and answer the following question based on what you find. Cite filenames inline where relevant.\n\nUser question: ${content}`
       : content;
 
-  let answer: string;
-  let responseId: string;
-  try {
-    const r = await chat({
-      prompt: grounded,
-      previousResponseId: lastAssistant?.response_id ?? null,
-      ...qc,
-    });
-    answer = r.response;
-    responseId = r.responseId;
-  } catch (err) {
-    // 502 (Bad Gateway) is the right status here — *we* are reachable but
-    // our upstream (OpenRAG) failed. The client surfaces the error as a
-    // red banner in the chat input.
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "chat failed" },
-      { status: 502 },
-    );
-  }
+  // Build the SSE stream and return it immediately so the browser can start
+  // receiving tokens while OpenRAG is still generating.
+  const stream = new ReadableStream({
+    async start(controller) {
+      function send(obj: Record<string, unknown>) {
+        controller.enqueue(`data: ${JSON.stringify(obj)}\n\n`);
+      }
 
-  db.prepare(
-    "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(uuid(), id, conversationId, "assistant", answer, responseId, Date.now());
+      try {
+        const events = await chatStream({
+          prompt: grounded,
+          previousResponseId: lastAssistant?.response_id ?? null,
+          ...qc,
+        });
 
-  // Include the updated title only on the first message — the client uses it
-  // to refresh the conversation switcher label without a full refresh.
-  return NextResponse.json({ answer, ...(updatedTitle ? { conversationTitle: updatedTitle } : {}) });
+        let assembled = "";
+        let responseId = "";
+
+        for await (const event of events) {
+          if (event.type === "content") {
+            assembled += event.delta;
+            send({ type: "delta", text: event.delta });
+          } else if (event.type === "done") {
+            responseId = event.chatId ?? "";
+          }
+          // "sources" events are ignored — we don't surface sources in the UI yet.
+        }
+
+        // Persist the completed assistant turn to SQLite.
+        db.prepare(
+          "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ).run(uuid(), id, conversationId, "assistant", assembled, responseId, Date.now());
+
+        console.log("[openrag] chat.stream ← responseId:", responseId, "  responseLength:", assembled.length);
+
+        // Signal completion. Include the new conversation title only on turn 1.
+        send({ type: "done", ...(updatedTitle ? { conversationTitle: updatedTitle } : {}) });
+      } catch (err) {
+        send({ type: "error", error: err instanceof Error ? err.message : "chat failed" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }

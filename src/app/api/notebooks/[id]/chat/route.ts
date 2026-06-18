@@ -10,26 +10,25 @@
 //      the first message it receives; ours should agree).
 //   3. Look up the last assistant `response_id` so OpenRAG can thread the
 //      conversation (no need to resend the full history).
-//   4. Frame the user's prompt with a "use the retrieval tool first"
-//      instruction (see below for *why* — this is the trick that makes
-//      "explain" actually search the documents).
+//   4. Send the prompt. When a knowledge filter is active (the normal case),
+//      the user's message goes as-is — the filter tells OpenRAG's agent which
+//      documents to search, so no extra wrapping is needed or wanted.
 //   5. Call OpenRAG, save the assistant turn with its response_id, return
 //      the answer (plus the updated conversation title if it changed).
 //
-// The framing trick deserves its own paragraph:
-//   OpenRAG's agent has an internal system prompt with rules like "use
-//   OpenSearch when the user references team names, product names, ...". A
-//   one-word prompt like "explain" matches none of those rules, so the
-//   agent skips retrieval and asks a clarifying question — *even when the
-//   user has uploaded a paper*. We fix this by wrapping every prompt (when
-//   the notebook has at least one document) with an explicit "retrieve from
-//   the user's uploaded documents and cite filenames" directive. The agent
-//   then always retrieves.
+// Why we stopped wrapping the prompt:
+//   We used to prepend "Use the OpenSearch Retrieval tool…Do NOT use general
+//   knowledge" to every message. That worked before filters existed, but once
+//   a filterId is in play the OpenRAG agent retrieves automatically. The hard
+//   constraint caused the agent to refuse ("No relevant sources found") when
+//   its internal confidence was below its own threshold — even when it had
+//   relevant docs. Lesson: don't fight the agent when the filter is doing its
+//   job. A light nudge is kept only for the rare no-filter fallback path.
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Message } from "@/lib/db";
+import db, { Notebook, Message, buildQueryConfig } from "@/lib/db";
 import { chat } from "@/lib/openrag";
 
 export const runtime = "nodejs";
@@ -44,9 +43,12 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { content, conversationId } = (await req.json()) as {
+  const { content, conversationId, selectedFilenames } = (await req.json()) as {
     content?: string;
     conversationId?: string;
+    /** Filenames the user has checked in the Sources panel. When present,
+     *  scope retrieval to only those files. When absent, use all ready docs. */
+    selectedFilenames?: string[];
   };
   if (!content?.trim()) {
     return NextResponse.json({ error: "empty" }, { status: 400 });
@@ -111,18 +113,13 @@ export async function POST(
     updatedTitle = titleFromContent;
   }
 
-  // The "force retrieval" framing — see file header for the why. We only
-  // wrap when there's actually something to retrieve; for an empty notebook
-  // we send the prompt as-is so the agent can have a normal conversation
-  // ("how do I add sources?" etc).
-  const docCount = (
-    db
-      .prepare("SELECT COUNT(*) AS n FROM documents WHERE notebook_id = ?")
-      .get(id) as { n: number }
-  ).n;
+  const qc = buildQueryConfig(id, notebook, selectedFilenames);
+
+  // When a filter is active the OpenRAG agent retrieves automatically — no
+  // prompt wrapping needed. Light nudge only for the no-filter fallback path.
   const grounded =
-    docCount > 0
-      ? `Use the OpenSearch Retrieval tool to find passages from the user's uploaded documents that answer the question below, then answer using only those passages and cite filenames inline. If the documents do not contain an answer, say so explicitly.\n\nUser question: ${content}`
+    !qc.filterId && qc.sourcePaths
+      ? `Search the uploaded documents and answer the following question based on what you find. Cite filenames inline where relevant.\n\nUser question: ${content}`
       : content;
 
   let answer: string;
@@ -131,7 +128,7 @@ export async function POST(
     const r = await chat({
       prompt: grounded,
       previousResponseId: lastAssistant?.response_id ?? null,
-      filterId: notebook.openrag_filter_id ?? null,
+      ...qc,
     });
     answer = r.response;
     responseId = r.responseId;

@@ -137,20 +137,35 @@ export async function chat(args: {
   prompt: string;
   previousResponseId?: string | null;
   filterId?: string | null;
-  limit?: number;
+  /** Filenames to scope retrieval to. Always sent as filters.data_sources
+   *  so OpenRAG's agent searches only those files. When absent the filter's
+   *  own data_sources list still applies via filterId. */
+  sourcePaths?: string[] | null;
+  /** limit and scoreThreshold come from the filter's own queryData config
+   *  (fetched by getFilterMeta and cached in SQLite). Callers pass them
+   *  through so we honour the values the user configured in OpenRAG. */
+  limit?: number | null;
+  scoreThreshold?: number | null;
 }): Promise<{ response: string; responseId: string }> {
-  const r = await getClient().chat.create({
+  const params = {
     message: args.prompt,
-    // The SDK calls this `chatId`; it is the same threading token we store
-    // as `response_id` in SQLite. Undefined (not null) tells the SDK to
-    // start a fresh conversation.
     chatId: args.previousResponseId ?? undefined,
-    // filterId scopes retrieval to the notebook's knowledge filter. Undefined
-    // (not null) means no filter — the SDK omits the field entirely.
     filterId: args.filterId ?? undefined,
-    stream: false,
+    // Always send the file list when we have one — lets OpenRAG scope to the
+    // exact set of documents the user has selected (or all ready docs).
+    filters: args.sourcePaths?.length
+      ? { data_sources: args.sourcePaths }
+      : undefined,
+    stream: false as const,
+    // Use the filter's configured limit/scoreThreshold when available;
+    // fall back to sensible defaults so the call always works.
     limit: args.limit ?? 8,
-  });
+    scoreThreshold: args.scoreThreshold ?? undefined,
+  };
+  // Log the exact SDK call so we can verify filter/source scoping during testing.
+  console.log("[openrag] chat.create →", JSON.stringify(params, null, 2));
+  const r = await getClient().chat.create(params);
+  console.log("[openrag] chat.create ← responseId:", r.chatId, "  responseLength:", r.response?.length);
   return { response: r.response, responseId: r.chatId ?? "" };
 }
 
@@ -215,15 +230,20 @@ export async function deleteConversation(chatId: string): Promise<void> {
 /**
  * Create a named knowledge filter in OpenRAG scoped to this notebook.
  *
- * `queryData: {}` creates an empty filter — no data_sources restriction, so every
- * document in the index is reachable. Retrieval is scoped by passing the returned
- * filterId to chat.create(), not at ingest time.
+ * We start the filter with an empty data_sources array so there is never a
+ * wildcard `["*"]` that would match every document in the index. The list is
+ * populated by syncFilterSources as documents are ingested.
  *
  * Best-effort callers should catch and proceed without a filter if this throws
  * (e.g. OpenRAG unreachable at notebook creation time).
  */
 export async function createFilter(name: string): Promise<{ filterId: string; filterName: string }> {
-  const r = await getClient().knowledgeFilters.create({ name, queryData: {} });
+  const r = await getClient().knowledgeFilters.create({
+    name,
+    // Start with an empty data_sources list — not a wildcard.
+    // syncFilterSources fills this in as documents become ready.
+    queryData: { filters: { data_sources: [] } },
+  });
   if (!r.success || !r.id) throw new Error(r.error ?? "filter creation failed");
   return { filterId: r.id, filterName: name };
 }
@@ -274,16 +294,23 @@ export async function updateFilterMeta(
 
 export async function getFilterMeta(
   filterId: string,
-): Promise<{ icon: string | null; color: string | null } | null> {
+): Promise<{ icon: string | null; color: string | null; limit: number | null; scoreThreshold: number | null } | null> {
   const f = await getClient().knowledgeFilters.get(filterId);
   if (!f) return null;
-  // icon and color are stored inside queryData (alongside filters/limit/etc),
-  // NOT at the top level of the filter object. The SDK type doesn't declare
-  // them, so we cast through unknown to read them without TS errors.
-  const qd = (f.queryData ?? {}) as { icon?: string; color?: string };
+  // icon, color, limit, and scoreThreshold are all stored inside queryData.
+  // The SDK type declares limit and scoreThreshold there; icon and color are
+  // undocumented but confirmed in the live filter payload.
+  const qd = (f.queryData ?? {}) as {
+    icon?: string;
+    color?: string;
+    limit?: number;
+    scoreThreshold?: number;
+  };
   return {
     icon: qd.icon ?? null,
     color: qd.color ?? null,
+    limit: qd.limit ?? null,
+    scoreThreshold: qd.scoreThreshold ?? null,
   };
 }
 
@@ -296,11 +323,6 @@ export async function getFilterMeta(
  *   purpose of per-notebook scoping. A full replace guarantees the list is
  *   exactly the current set of indexed files, no more and no less.
  *
- * The other filter fields (document_types, owners, connector_types) must also
- * be present as ["*"] wildcards — as shown in the live FilterTime filter —
- * or OpenRAG returns no results. We preserve any existing values and default
- * to ["*"] so the update is always safe to call.
- *
  * Best-effort — callers swallow errors; ingest still succeeds without it.
  */
 export async function syncFilterSources(filterId: string, filenames: string[]): Promise<void> {
@@ -308,13 +330,16 @@ export async function syncFilterSources(filterId: string, filenames: string[]): 
   const current = await client.knowledgeFilters.get(filterId);
   if (!current) return; // filter not found — nothing to update
 
+  // Only set data_sources — do NOT add owners/connector_types/document_types wildcards.
+  // Adding those extra constraints caused OpenRAG to return 0 results.
+  // The reference app (spec_coding_openrag_notebook_app) only sets data_sources here.
   await client.knowledgeFilters.update(filterId, {
     queryData: {
       ...current.queryData,
       filters: {
-        document_types: current.queryData?.filters?.document_types ?? ["*"],
-        owners: current.queryData?.filters?.owners ?? ["*"],
-        connector_types: current.queryData?.filters?.connector_types ?? ["*"],
+        // Preserve any existing filter sub-fields (document_types etc.) but
+        // only if they're already set — don't introduce new wildcard constraints.
+        ...current.queryData?.filters,
         // Replace data_sources with the exact set of ready filenames.
         // This clears the initial ["*"] wildcard OpenRAG sets on creation.
         data_sources: filenames,
@@ -377,10 +402,21 @@ export async function generateNote(args: {
   type: "summary" | "mindmap" | "outline" | "qa";
   topic?: string;
   filterId?: string | null;
+  sourcePaths?: string[] | null;
+  limit?: number | null;
+  scoreThreshold?: number | null;
 }): Promise<{ content: string; responseId: string }> {
   const base = NOTE_PROMPTS[args.type];
   const prompt = args.topic ? `${base} Focus on: ${args.topic}.` : base;
-  const { response, responseId } = await chat({ prompt, filterId: args.filterId, limit: 12 });
+  // Use the filter's configured limit when available; notes default to 12
+  // (vs chat's 8) for broader retrieval coverage over the full document set.
+  const { response, responseId } = await chat({
+    prompt,
+    filterId: args.filterId,
+    sourcePaths: args.sourcePaths,
+    limit: args.limit ?? 12,
+    scoreThreshold: args.scoreThreshold,
+  });
   return { content: response, responseId };
 }
 

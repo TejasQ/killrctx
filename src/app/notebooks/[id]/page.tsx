@@ -73,6 +73,8 @@ export default function NotebookPage({
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  // Doc IDs the user has checked in the Sources panel. Empty = all docs in scope.
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
   const [sourcesWidth, setSourcesWidth] = useState(280); // px, min 180 max 520
   const [sourcesDragging, setSourcesDragging] = useState(false);
@@ -240,6 +242,8 @@ export default function NotebookPage({
           collapsed={sourcesCollapsed}
           onToggle={() => setSourcesCollapsed((v) => !v)}
           onResizeDrag={startSourcesResize}
+          selectedDocIds={selectedDocIds}
+          onSelectionChange={setSelectedDocIds}
         />
         <ChatPanel
           notebookId={id}
@@ -275,6 +279,11 @@ export default function NotebookPage({
               cs.map((c) => (c.id === convId ? { ...c, title } : c)),
             )
           }
+          selectedFilenames={
+            selectedDocIds.size > 0
+              ? documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.filename)
+              : []
+          }
         />
         <StudioPanel
           notebookId={id}
@@ -285,6 +294,11 @@ export default function NotebookPage({
           collapsed={studioCollapsed}
           onToggle={() => setStudioCollapsed((v) => !v)}
           onResizeDrag={startStudioResize}
+          selectedFilenames={
+            selectedDocIds.size > 0
+              ? documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.filename)
+              : []
+          }
         />
       </div>
     </div>
@@ -307,6 +321,8 @@ function SourcesPanel({
   collapsed,
   onToggle,
   onResizeDrag,
+  selectedDocIds,
+  onSelectionChange,
 }: {
   notebookId: string;
   documents: Document[];
@@ -316,6 +332,8 @@ function SourcesPanel({
   collapsed: boolean;
   onToggle: () => void;
   onResizeDrag: (startX: number) => void;
+  selectedDocIds: Set<string>;
+  onSelectionChange: (ids: Set<string>) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
@@ -334,7 +352,11 @@ function SourcesPanel({
   ]);
   const ACCEPT = [...SUPPORTED_EXTENSIONS].join(",");
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Selection state is lifted to page level so ChatPanel and StudioPanel can
+  // scope their queries to checked files. `selectedDocIds` / `onSelectionChange`
+  // are passed down as props; rename locally for readability.
+  const selected = selectedDocIds;
+  const setSelected = onSelectionChange;
   const [deleting, setDeleting] = useState(false);
   // When duplicates are detected, we park the pending files here and show
   // OverwriteDialog. The dialog resolves a Promise with the filenames the
@@ -438,11 +460,9 @@ function SourcesPanel({
   }
 
   function toggleSelect(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+    const next = new Set(selected);
+    next.has(id) ? next.delete(id) : next.add(id);
+    setSelected(next);
   }
 
   const allSelected = documents.length > 0 && selected.size === documents.length;
@@ -714,6 +734,7 @@ function ChatPanel({
   onConvCreated,
   onConvDeleted,
   onConvRenamed,
+  selectedFilenames,
 }: {
   notebookId: string;
   messages: Message[];
@@ -724,6 +745,8 @@ function ChatPanel({
   onConvCreated: (conv: Conversation) => void;
   onConvDeleted: (deletedId: string, replacement?: Conversation) => void;
   onConvRenamed: (convId: string, title: string) => void;
+  /** Filenames checked in Sources panel; empty = use all notebook docs. */
+  selectedFilenames: string[];
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -748,7 +771,12 @@ function ChatPanel({
       const res = await fetch(`/api/notebooks/${notebookId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: input, conversationId: activeConvId }),
+        body: JSON.stringify({
+          content: input,
+          conversationId: activeConvId,
+          // Only send when non-empty — the route treats absence as "all docs".
+          ...(selectedFilenames.length > 0 && { selectedFilenames }),
+        }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -933,6 +961,7 @@ function StudioPanel({
   collapsed,
   onToggle,
   onResizeDrag,
+  selectedFilenames,
 }: {
   notebookId: string;
   notes: Note[];
@@ -942,6 +971,8 @@ function StudioPanel({
   collapsed: boolean;
   onToggle: () => void;
   onResizeDrag: (startX: number) => void;
+  /** Filenames checked in Sources panel; empty = use all notebook docs. */
+  selectedFilenames: string[];
 }) {
   // Which type card is currently selected (null = grid only, no generate panel).
   const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
@@ -963,7 +994,11 @@ function StudioPanel({
       await fetch(entry.route(notebookId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic }),
+        body: JSON.stringify({
+          topic,
+          // Only send when non-empty — the route treats absence as "all docs".
+          ...(selectedFilenames.length > 0 && { selectedFilenames }),
+        }),
       });
       setTopic("");
       setActiveType(null); // collapse the generate panel after success

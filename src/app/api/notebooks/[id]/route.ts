@@ -103,15 +103,20 @@ export async function GET(
       const meta = await getFilterMeta(notebook.openrag_filter_id);
       if (meta) {
         db.prepare(
-          "UPDATE notebooks SET openrag_filter_icon = ?, openrag_filter_color = ? WHERE id = ?",
-        ).run(meta.icon, meta.color, id);
+          `UPDATE notebooks
+           SET openrag_filter_icon = ?, openrag_filter_color = ?,
+               openrag_filter_limit = ?, openrag_filter_score_threshold = ?
+           WHERE id = ?`,
+        ).run(meta.icon, meta.color, meta.limit, meta.scoreThreshold, id);
         // Mutate the already-fetched notebook object so this response
         // carries the fresh values without a second SELECT.
         notebook.openrag_filter_icon = meta.icon;
         notebook.openrag_filter_color = meta.color;
+        notebook.openrag_filter_limit = meta.limit;
+        notebook.openrag_filter_score_threshold = meta.scoreThreshold;
       }
     } catch {
-      // OpenRAG unreachable — serve the SQLite-cached icon/color as fallback.
+      // OpenRAG unreachable — serve the SQLite-cached values as fallback.
     }
   }
 

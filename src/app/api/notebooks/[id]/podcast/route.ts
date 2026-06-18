@@ -29,7 +29,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Note } from "@/lib/db";
+import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
 import { draftScript, parseScript, synthesizeAndStitch } from "@/lib/podcast";
 
 export const runtime = "nodejs";
@@ -55,9 +55,10 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { topic, title } = (await req.json().catch(() => ({}))) as {
+  const { topic, title, selectedFilenames } = (await req.json().catch(() => ({}))) as {
     topic?: string;
     title?: string;
+    selectedFilenames?: string[];
   };
 
   const notebook = db
@@ -66,6 +67,8 @@ export async function POST(
   if (!notebook) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+
+  const qc = buildQueryConfig(id, notebook, selectedFilenames);
 
   const podcastId = uuid();
   const now = Date.now();
@@ -86,10 +89,12 @@ export async function POST(
   void (async () => {
     try {
       // === Step 1: draft script ==============================================
-      const script = await draftScript(topic, notebook.openrag_filter_id ?? null);
+      const { script, responseId } = await draftScript({ topic, ...qc });
+      // Save response_id so the DELETE handler can clean up the OpenRAG thread,
+      // same as every other note type.
       db.prepare(
-        "UPDATE notes SET script = ?, status = ? WHERE id = ?",
-      ).run(script, "synthesizing", podcastId);
+        "UPDATE notes SET script = ?, status = ?, response_id = ? WHERE id = ?",
+      ).run(script, "synthesizing", responseId, podcastId);
 
       // === Step 2: parse turns ==============================================
       const turns = parseScript(script);

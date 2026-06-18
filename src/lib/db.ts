@@ -52,10 +52,12 @@ export type Notebook = {
   title: string;
   created_at: number; // ms since epoch (Date.now())
   openrag_collection: string; // unused right now (no per-notebook isolation)
-  openrag_filter_id: string | null;    // OpenRAG knowledge filter ID; null for old notebooks
-  openrag_filter_name: string | null;  // display name stored at creation; no round-trip needed
-  openrag_filter_icon: string | null;  // icon name set by user in OpenRAG UI; refreshed on GET
-  openrag_filter_color: string | null; // color name set by user in OpenRAG UI; refreshed on GET
+  openrag_filter_id: string | null;              // OpenRAG knowledge filter ID; null for old notebooks
+  openrag_filter_name: string | null;            // display name stored at creation; no round-trip needed
+  openrag_filter_icon: string | null;            // icon name set by user in OpenRAG UI; refreshed on GET
+  openrag_filter_color: string | null;           // color name set by user in OpenRAG UI; refreshed on GET
+  openrag_filter_limit: number | null;           // queryData.limit from OpenRAG; refreshed on GET
+  openrag_filter_score_threshold: number | null; // queryData.scoreThreshold from OpenRAG; refreshed on GET
 };
 
 export type Document = {
@@ -181,6 +183,12 @@ function getDb(): Database.Database {
     if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_color")) {
       conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_color TEXT");
     }
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_limit")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_limit INTEGER");
+    }
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_score_threshold")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_score_threshold REAL");
+    }
   } catch {
     // notebooks table doesn't exist yet — CREATE TABLE below includes the columns.
   }
@@ -204,10 +212,12 @@ function getDb(): Database.Database {
       title TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       openrag_collection  TEXT NOT NULL,
-      openrag_filter_id   TEXT,
-      openrag_filter_name TEXT,
-      openrag_filter_icon  TEXT,
-      openrag_filter_color TEXT
+      openrag_filter_id              TEXT,
+      openrag_filter_name            TEXT,
+      openrag_filter_icon            TEXT,
+      openrag_filter_color           TEXT,
+      openrag_filter_limit           INTEGER,
+      openrag_filter_score_threshold REAL
     );
     CREATE TABLE IF NOT EXISTS conversations (
       id          TEXT PRIMARY KEY,
@@ -297,6 +307,57 @@ function getDb(): Database.Database {
   _db = conn;
   return conn;
 }
+
+
+/**
+ * The filter + source config every OpenRAG call needs.
+ *
+ * Returned by `buildQueryConfig` and spread directly into `chat()`,
+ * `generateNote()`, and `draftScript()` args so every route passes
+ * identical query parameters without repeating the lookup logic.
+ */
+export type QueryConfig = {
+  filterId: string | null;
+  sourcePaths: string[] | null;
+  limit: number | null;
+  scoreThreshold: number | null;
+};
+
+/**
+ * Build the OpenRAG query config for a notebook request.
+ *
+ * _Basically_, every route that calls OpenRAG needs the same four things:
+ * the filter ID, the list of files to scope retrieval to, and the limit /
+ * scoreThreshold the user configured on that filter. This function reads
+ * them all in one place so the routes stay thin.
+ *
+ * `selectedFilenames` are the files the user checked in the Sources panel.
+ * When provided we scope to those only; when absent we use all ready docs.
+ * When the notebook has no ready docs we return `sourcePaths: null` so the
+ * caller sends no inline filter (the filterId alone applies).
+ */
+export function buildQueryConfig(
+  notebookId: string,
+  notebook: Notebook,
+  selectedFilenames?: string[],
+): QueryConfig {
+  const readyDocs = getDb()
+    .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
+    .all(notebookId) as { filename: string }[];
+
+  const sourcePaths: string[] | null =
+    readyDocs.length === 0
+      ? null
+      : (selectedFilenames?.length ? selectedFilenames : readyDocs.map((d) => d.filename));
+
+  return {
+    filterId: notebook.openrag_filter_id ?? null,
+    sourcePaths,
+    limit: notebook.openrag_filter_limit ?? null,
+    scoreThreshold: notebook.openrag_filter_score_threshold ?? null,
+  };
+}
+
 
 // Default export is a Proxy that forwards every property access to the real
 // (lazily-opened) Database. Lets API routes write `db.prepare(...)` directly

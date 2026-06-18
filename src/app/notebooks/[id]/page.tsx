@@ -187,8 +187,6 @@ export default function NotebookPage({
               }
             }}
           />
-        </div>
-        <div className="flex items-center gap-4 text-xs text-muted">
           {notebook.openrag_filter_name && (
             <FilterPickerPopover
               notebookId={notebook.id}
@@ -200,6 +198,8 @@ export default function NotebookPage({
               }
             />
           )}
+        </div>
+        <div className="flex items-center gap-4 text-xs text-muted">
           {openragSettings && (
             <ModelPickerPopover
               kind="llm"

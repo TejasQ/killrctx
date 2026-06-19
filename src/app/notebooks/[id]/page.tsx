@@ -761,41 +761,44 @@ const markdownComponents: Components = {
 const outlineComponents: Components = {
   ...markdownComponents,
 
-  // H2 — inline text chip, pink. (palette: zinc / pink / purple / indigo / emerald)
+  // H1 — document title. Large, white, no chip.
+  h1: ({ children }) => (
+    <h1 className="mb-4 text-xl font-bold text-white">{children}</h1>
+  ),
+
+  // H2 — top-level section chip, pink. Slightly smaller than H1.
   h2: ({ children }) => (
     <h2 className="mt-4 mb-1 first:mt-0">
-      <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-sm font-bold text-pink-300">
+      <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-base font-bold text-pink-300">
         {children}
       </span>
     </h2>
   ),
 
-  // H3 — inline text chip, purple.
+  // H3 — subsection chip, purple. Smaller than H2.
   h3: ({ children }) => (
     <h3 className="mt-3 mb-1">
-      <span className="inline-block rounded border border-purple-400/25 bg-purple-500/10 px-2 py-0.5 text-sm font-semibold text-purple-300">
+      <span className="inline-block rounded border border-purple-400/30 bg-purple-600/10 px-2 py-0.5 text-sm font-semibold text-purple-300">
         {children}
       </span>
     </h3>
   ),
 
-  // H4 — inline text chip, indigo.
+  // H4 — detail chip, blue. Smallest.
   h4: ({ children }) => (
     <h4 className="mt-2 mb-0.5">
-      <span className="inline-block rounded border border-indigo-400/20 bg-indigo-500/10 px-2 py-0.5 text-xs font-semibold text-indigo-300">
+      <span className="inline-block rounded border border-blue-400/20 bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-300">
         {children}
       </span>
     </h4>
   ),
 
-  // ol — connector line runs down the left side of the list, linking items
-  // back to their parent heading visually. Also injects data-idx onto each
-  // <li> for pill badges (counting only valid elements to avoid the ×2 skip
-  // caused by whitespace text nodes between tags).
+  // ol — connector line in dark indigo (the deep middle swatch), linking items
+  // back to their parent heading. Also injects data-idx for pill badges.
   ol: ({ children }) => {
     let elementCount = 0;
     return (
-      <ol className="mb-2 space-y-1 border-l border-zinc-700/50 pl-3 ml-3">
+      <ol className="mb-2 space-y-1 border-l border-indigo-950/80 pl-3 ml-3">
         {React.Children.map(children, (child) => {
           if (!React.isValidElement(child)) return child;
           elementCount += 1;
@@ -810,7 +813,7 @@ const outlineComponents: Components = {
 
   // ul — same connector line treatment as ol, without the index injection.
   ul: ({ children }) => (
-    <ul className="mb-2 space-y-1 border-l border-zinc-700/50 pl-3 ml-3">{children}</ul>
+    <ul className="mb-2 space-y-1 border-l border-indigo-950/80 pl-3 ml-3">{children}</ul>
   ),
 
   // li — amber pill badge for numbered items (ol); teal dot for bullets (ul).
@@ -879,12 +882,12 @@ function OutlineSection({ heading, body }: OutlineSection) {
         onClick={() => setOpen((v) => !v)}
         className="mt-4 mb-1 flex w-full items-center justify-between first:mt-0"
       >
-        <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-sm font-bold text-pink-300">
+        <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-base font-bold text-pink-300">
           {heading}
         </span>
         {/* Chevron rotates 90° when collapsed — CSS transition on transform. */}
         <span
-          className="ml-2 text-xs text-pink-300/60 transition-transform duration-200"
+          className="ml-2 text-lg text-pink-300/60 transition-transform duration-200"
           style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
         >
           ▾
@@ -1267,11 +1270,11 @@ function ChatPanel({
 // dedicated route; the rest go through /notes/<type>.
 // ============================================================================
 const NOTE_TYPES = [
-  { type: "podcast",  label: "Podcast",  icon: "🎙", color: "bg-cyan-500/10    border-cyan-500/20    hover:border-cyan-400/50    hover:bg-cyan-500/15",    activeColor: "border-cyan-400/70    bg-cyan-500/20    shadow-[0_0_12px_rgba(34,211,238,0.15)]",    route: (id: string) => `/api/notebooks/${id}/podcast` },
-  { type: "summary",  label: "Summary",  icon: "☰",  color: "bg-fuchsia-500/10 border-fuchsia-500/20 hover:border-fuchsia-400/50 hover:bg-fuchsia-500/15", activeColor: "border-fuchsia-400/70 bg-fuchsia-500/20 shadow-[0_0_12px_rgba(217,70,239,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/summary` },
-  { type: "mindmap",  label: "Mind Map", icon: "✦",  color: "bg-violet-500/10  border-violet-500/20  hover:border-violet-400/50  hover:bg-violet-500/15",  activeColor: "border-violet-400/70  bg-violet-500/20  shadow-[0_0_12px_rgba(139,92,246,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/mindmap` },
-  { type: "outline",  label: "Outline",  icon: "≡",  color: "bg-pink-500/10    border-pink-500/20    hover:border-pink-400/50    hover:bg-pink-500/15",    activeColor: "border-pink-400/70    bg-pink-500/20    shadow-[0_0_12px_rgba(236,72,153,0.15)]",    route: (id: string) => `/api/notebooks/${id}/notes/outline` },
-  { type: "qa",       label: "Q&A",      icon: "?",  color: "bg-indigo-500/10  border-indigo-500/20  hover:border-indigo-400/50  hover:bg-indigo-500/15",  activeColor: "border-indigo-400/70  bg-indigo-500/20  shadow-[0_0_12px_rgba(99,102,241,0.15)]",   route: (id: string) => `/api/notebooks/${id}/notes/qa` },
+  { type: "podcast",  label: "Podcast",  icon: "🎙", color: "bg-pink-500/20   border-pink-500/40   hover:border-pink-400/70   hover:bg-pink-500/30",   activeColor: "border-pink-400/90   bg-pink-500/40   shadow-[0_0_16px_rgba(236,72,153,0.3)]",   route: (id: string) => `/api/notebooks/${id}/podcast` },
+  { type: "summary",  label: "Summary",  icon: "☰",  color: "bg-purple-500/20 border-purple-500/40 hover:border-purple-400/70 hover:bg-purple-500/30", activeColor: "border-purple-400/90 bg-purple-500/40 shadow-[0_0_16px_rgba(168,85,247,0.3)]",  route: (id: string) => `/api/notebooks/${id}/notes/summary` },
+  { type: "mindmap",  label: "Mind Map", icon: "✦",  color: "bg-blue-500/20   border-blue-500/40   hover:border-blue-400/70   hover:bg-blue-500/30",   activeColor: "border-blue-400/90   bg-blue-500/40   shadow-[0_0_16px_rgba(59,130,246,0.3)]",   route: (id: string) => `/api/notebooks/${id}/notes/mindmap` },
+  { type: "outline",  label: "Outline",  icon: "≡",  color: "bg-sky-500/20    border-sky-500/40    hover:border-sky-400/70    hover:bg-sky-500/30",    activeColor: "border-sky-400/90    bg-sky-500/40    shadow-[0_0_16px_rgba(14,165,233,0.3)]",    route: (id: string) => `/api/notebooks/${id}/notes/outline` },
+  { type: "qa",       label: "Q&A",      icon: "?",  color: "bg-indigo-500/20 border-indigo-500/40 hover:border-indigo-400/70 hover:bg-indigo-500/30", activeColor: "border-indigo-400/90 bg-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.3)]",  route: (id: string) => `/api/notebooks/${id}/notes/qa` },
 ] as const;
 
 type NoteTypeKey = (typeof NOTE_TYPES)[number]["type"];

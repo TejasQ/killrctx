@@ -492,7 +492,7 @@ function SourcesPanel({
         title="Drag to resize"
       />
       {/* Row 1: title + collapse */}
-      <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+      <div className="flex h-10 items-center justify-between border-b border-edge px-4">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted">Sources</span>
         <button onClick={onToggle} className="text-xs text-muted hover:text-white" title="Collapse Sources">
           ‹
@@ -962,7 +962,7 @@ function ChatPanel({
   return (
     <section className="flex min-h-0 flex-col bg-ink">
       {/* Conversation switcher header */}
-      <div className="flex items-center gap-2 border-b border-edge bg-panel px-4 py-2">
+      <div className="flex h-10 items-center gap-2 border-b border-edge bg-panel px-4">
         <select
           value={activeConvId ?? ""}
           onChange={(e) => onConvChange(e.target.value)}
@@ -1248,7 +1248,7 @@ function StudioPanel({
       <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
         {resizeHandle}
         {/* Breadcrumb header: "Studio › Note title" with collapse toggle */}
-        <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+        <div className="flex h-10 items-center justify-between border-b border-edge px-4">
           <div className="flex items-center gap-1.5 text-xs text-muted">
             <button onClick={onToggle} className="font-semibold uppercase tracking-wider hover:text-white" title="Collapse Studio">Studio</button>
             <span>›</span>
@@ -1293,7 +1293,7 @@ function StudioPanel({
   return (
     <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
       {resizeHandle}
-      <div className="flex items-center justify-between border-b border-edge px-4 py-3">
+      <div className="flex h-10 items-center justify-between border-b border-edge px-4">
         <span className="text-xs font-semibold uppercase tracking-wider text-muted">Studio</span>
         <button onClick={onToggle} className="text-xs text-muted hover:text-white" title="Collapse Studio">
           ›

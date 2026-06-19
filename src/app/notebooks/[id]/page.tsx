@@ -755,9 +755,21 @@ const markdownComponents: Components = {
 // code, blockquotes, etc. inherit their existing styles; we only replace the
 // five elements that carry structural meaning in an outline.
 //
-// Colors: amber (H2) → orange (H3) → rose (H4), with matching left-border
-// rails that get thinner at each level. Ordered-list items get a small pill
-// badge instead of a plain numeral so section numbers feel like landmarks.
+// Hierarchy is legible from type alone (works in grayscale):
+//   L1 (H2) — only filled pill in the document; ~18px / weight-600
+//   L2 (H3) — plain text, near-white; ~15px / weight-600
+//   L3 (H4) — bold medium-gray text; ~13.5px / weight-600
+//   L4 (ol) — small numbered badge + normal body text; ~13px / weight-400
+//
+// Color ramp is monochrome: bright surface (L1) → bright text (L2) →
+// medium-gray text (L3) → normal body (L4). No hue is used for hierarchy —
+// the app's accent (#7c5cff violet) is reserved for interactive elements only.
+//
+// Spacing encodes grouping: gap between siblings at level N is always wider
+// than the gap from a parent to its first child, so items "cluster" visually.
+//
+// A faint 1px vertical rail (rgba white 8%) on ol/ul containers acts as a
+// wayfinding guide through deep nesting without reading as a divider.
 // ============================================================================
 const outlineComponents: Components = {
   ...markdownComponents,
@@ -767,39 +779,44 @@ const outlineComponents: Components = {
     <h1 className="mb-4 text-xl font-bold text-white">{children}</h1>
   ),
 
-  // H2 — top-level section chip, pink. Slightly smaller than H1.
+  // H2 — L1 category. The ONLY filled pill in the outline.
+  // Neutral raised surface (white/8% on the dark panel bg). Near-white label.
+  // No saturated color — the pill reads as "elevated", not "interactive".
+  // mt-8 (~32px) is the largest gap in the document — signals a new section.
   h2: ({ children }) => (
-    <h2 className="mt-4 mb-1 first:mt-0">
-      <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-base font-bold text-pink-300">
+    <h2 className="mt-8 mb-1 first:mt-0">
+      <span className="inline-block rounded bg-white/[0.08] px-2.5 py-1 text-[18px] leading-[1.2] font-semibold text-white">
         {children}
       </span>
     </h2>
   ),
 
-  // H3 — subsection chip, purple. Smaller than H2.
+  // H3 — L2 hero/subsection. Plain text only — no fill, no border, no decoration.
+  // Size (~15px) + spacing (~20px top margin) carry the level signal alone.
   h3: ({ children }) => (
-    <h3 className="mt-3 mb-1">
-      <span className="inline-block rounded border border-purple-400/30 bg-purple-600/10 px-2 py-0.5 text-sm font-semibold text-purple-300">
-        {children}
-      </span>
+    <h3 className="mt-5 mb-1 text-[15px] font-semibold text-white">
+      {children}
     </h3>
   ),
 
-  // H4 — detail chip, blue. Smallest.
+  // H4 — L3 ability name. Medium-gray bold text — dimmer than L2, heavier than L4.
+  // white/70 is not a link color (accent is violet); no interactivity implied.
+  // mt-3.5 (~14px) separates abilities; mb-0 so the first L4 step sits tight
+  // beneath it (the ol's own mt handles the 4px parent→child gap).
   h4: ({ children }) => (
-    <h4 className="mt-2 mb-0.5">
-      <span className="inline-block rounded border border-blue-400/20 bg-blue-500/10 px-2 py-0.5 text-xs font-semibold text-blue-300">
-        {children}
-      </span>
+    <h4 className="mt-3.5 mb-0 text-[13.5px] font-semibold text-white/70">
+      {children}
     </h4>
   ),
 
-  // ol — connector line in dark indigo (the deep middle swatch), linking items
-  // back to their parent heading. Also injects data-idx for pill badges.
+  // ol — L4 detail steps. mt-1 (~4px) keeps steps attached to their L3 parent.
+  // space-y-0.5 (~2px) between consecutive steps.
+  // Faint 1px left rail is a wayfinding guide, not a divider.
+  // Injects data-idx so the li renderer can show numbered badges.
   ol: ({ children }) => {
     let elementCount = 0;
     return (
-      <ol className="mb-2 space-y-1 border-l border-indigo-950/80 pl-3 ml-3">
+      <ol className="mt-1 mb-3 space-y-0.5 border-l border-white/[0.08] pl-5 ml-5">
         {React.Children.map(children, (child) => {
           if (!React.isValidElement(child)) return child;
           elementCount += 1;
@@ -812,20 +829,19 @@ const outlineComponents: Components = {
     );
   },
 
-  // ul — same connector line treatment as ol, without the index injection.
+  // ul — same rail treatment as ol, without index injection.
   ul: ({ children }) => (
-    <ul className="mb-2 space-y-1 border-l border-indigo-950/80 pl-3 ml-3">{children}</ul>
+    <ul className="mt-1 mb-3 space-y-0.5 border-l border-white/[0.08] pl-5 ml-5">{children}</ul>
   ),
 
-  // li — amber pill badge for numbered items (ol); teal dot for bullets (ul).
-  // data-idx is injected by the ol renderer above; its absence means we're
-  // inside a ul, so we show a small teal dot instead.
+  // li — small numbered badge for ol items; faint dot for ul items.
+  // text-[13px] / weight-400 keeps L4 steps clearly lighter than L3 headers.
   li: ({ children, ...rest }) => {
     const n = (rest as Record<string, unknown>)["data-idx"];
     return (
-      <li className="flex items-start gap-2">
+      <li className="flex items-start gap-2 text-[13px] font-normal">
         {typeof n === "number" ? (
-          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-zinc-500/20 text-[10px] font-semibold text-zinc-400">
+          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-zinc-600/30 text-[10px] font-semibold text-zinc-300">
             {n}
           </span>
         ) : (
@@ -877,30 +893,32 @@ function OutlineSection({ heading, body }: OutlineSection) {
   const [open, setOpen] = useState(true);
   return (
     <div>
-      {/* Clickable H2 chip — same rose styling as outlineComponents.h2 but
-          with an onClick and a chevron to signal collapsibility. */}
+      {/* Clickable L1 pill — matches outlineComponents.h2 neutral surface style,
+          plus an explicit chevron so the collapse affordance is unambiguous.
+          No saturated color; the pill reads "elevated", not "interactive". */}
       <button
         onClick={() => setOpen((v) => !v)}
-        className="mt-4 mb-1 flex w-full items-center justify-between first:mt-0"
+        className="mt-8 mb-1 flex w-full items-center justify-between first:mt-0"
       >
-        <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-base font-bold text-pink-300">
+        <span className="inline-flex items-center gap-1.5 rounded bg-white/[0.08] px-2.5 py-1 text-[18px] leading-[1.2] font-semibold text-white">
           {heading}
         </span>
-        {/* Chevron rotates 90° when collapsed — CSS transition on transform. */}
-        <span
-          className="ml-2 text-lg text-pink-300/60 transition-transform duration-200"
+        {/* Chevron: explicit caret so users know this is a collapse control. */}
+        <svg
+          className="ml-2 h-4 w-4 shrink-0 text-white/40 transition-transform duration-200"
           style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          aria-hidden="true"
         >
-          ▾
-        </span>
+          <path d="M4.5 6 L8 10 L11.5 6" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
       {/* max-height transition: animates open/close without knowing actual height.
-          The cap (9999px) is large enough for any outline section; the browser
-          animates to that value but the content clips it to its real height.
-          The faint pink background tints the section body to visually tie it
-          to its pink H2 heading above. */}
+          9999px cap is large enough for any section; browser clips to real height.
+          No tint — the section body uses the panel background unchanged. */}
       <div
-        className="overflow-hidden transition-all duration-300 ease-in-out rounded-b-md bg-pink-500/[0.04]"
+        className="overflow-hidden transition-all duration-300 ease-in-out"
         style={{ maxHeight: open ? "9999px" : "0px" }}
       >
         {body && (

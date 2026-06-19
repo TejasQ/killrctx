@@ -53,6 +53,7 @@ type Note = {
   id: string;
   type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
   title: string;
+  topic: string | null;
   content: string | null;
   status: "pending" | "scripting" | "synthesizing" | "ready" | "failed" | null;
   audio_url: string | null;
@@ -895,9 +896,11 @@ function OutlineSection({ heading, body }: OutlineSection) {
       </button>
       {/* max-height transition: animates open/close without knowing actual height.
           The cap (9999px) is large enough for any outline section; the browser
-          animates to that value but the content clips it to its real height. */}
+          animates to that value but the content clips it to its real height.
+          The faint pink background tints the section body to visually tie it
+          to its pink H2 heading above. */}
       <div
-        className="overflow-hidden transition-all duration-300 ease-in-out"
+        className="overflow-hidden transition-all duration-300 ease-in-out rounded-b-md bg-pink-500/[0.04]"
         style={{ maxHeight: open ? "9999px" : "0px" }}
       >
         {body && (
@@ -910,11 +913,14 @@ function OutlineSection({ heading, body }: OutlineSection) {
   );
 }
 
-function OutlineRenderer({ content }: { content: string }) {
+function OutlineRenderer({ content, topic }: { content: string; topic?: string | null }) {
   const sections = splitOutlineSections(fixMarkdown(content));
 
   return (
     <div>
+      {topic && (
+        <p className="mb-3 text-xs text-muted">Focus: {topic}</p>
+      )}
       {sections.map((section, i) =>
         // Preamble (empty heading) renders directly without a collapsible wrapper.
         section.heading === "" ? (
@@ -1453,7 +1459,7 @@ function StudioPanel({
             <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
           ) : expandedNote.content ? (
             expandedNote.type === "outline" ? (
-              <OutlineRenderer content={expandedNote.content} />
+              <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
             ) : (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                 {fixMarkdown(expandedNote.content)}
@@ -1667,7 +1673,7 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
       {expanded && note.content && (
         <div className="border-t border-edge px-3 py-2 text-sm">
           {note.type === "outline" ? (
-            <OutlineRenderer content={note.content} />
+            <OutlineRenderer content={note.content} topic={note.topic} />
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
               {fixMarkdown(note.content)}

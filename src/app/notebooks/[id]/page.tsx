@@ -761,19 +761,19 @@ const markdownComponents: Components = {
 const outlineComponents: Components = {
   ...markdownComponents,
 
-  // H2 — inline text chip, rose.
+  // H2 — inline text chip, pink. (palette: zinc / pink / purple / indigo / emerald)
   h2: ({ children }) => (
     <h2 className="mt-4 mb-1 first:mt-0">
-      <span className="inline-block rounded border border-rose-400/30 bg-rose-500/10 px-2 py-0.5 text-sm font-bold text-rose-300">
+      <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-sm font-bold text-pink-300">
         {children}
       </span>
     </h2>
   ),
 
-  // H3 — inline text chip, teal.
+  // H3 — inline text chip, purple.
   h3: ({ children }) => (
     <h3 className="mt-3 mb-1">
-      <span className="inline-block rounded border border-teal-400/25 bg-teal-500/10 px-2 py-0.5 text-sm font-semibold text-teal-300">
+      <span className="inline-block rounded border border-purple-400/25 bg-purple-500/10 px-2 py-0.5 text-sm font-semibold text-purple-300">
         {children}
       </span>
     </h3>
@@ -832,6 +832,99 @@ const outlineComponents: Components = {
     );
   },
 };
+
+// ============================================================================
+// OutlineRenderer — collapsible section renderer for Outline notes
+// ============================================================================
+//
+// _Basically_, ReactMarkdown renders nodes in isolation so an h2 renderer
+// can't reach its following siblings to hide them. Instead we split the raw
+// markdown string into { heading, body } pairs by H2 boundary first, then
+// render each pair as a self-contained accordion item with its own useState.
+// ============================================================================
+
+type OutlineSection = { heading: string; body: string };
+
+// Split markdown into sections at every `## ` boundary.
+// Lines before the first H2 land in a section with an empty heading.
+function splitOutlineSections(markdown: string): OutlineSection[] {
+  const lines = markdown.split("\n");
+  const sections: OutlineSection[] = [];
+  let currentHeading = "";
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      // Flush the previous section before starting a new one.
+      sections.push({ heading: currentHeading, body: currentLines.join("\n").trim() });
+      currentHeading = line.slice(3).trim(); // strip the "## " prefix
+      currentLines = [];
+    } else {
+      currentLines.push(line);
+    }
+  }
+  // Flush the final section.
+  sections.push({ heading: currentHeading, body: currentLines.join("\n").trim() });
+
+  return sections;
+}
+
+function OutlineSection({ heading, body }: OutlineSection) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div>
+      {/* Clickable H2 chip — same rose styling as outlineComponents.h2 but
+          with an onClick and a chevron to signal collapsibility. */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="mt-4 mb-1 flex w-full items-center justify-between first:mt-0"
+      >
+        <span className="inline-block rounded border border-pink-400/30 bg-pink-500/10 px-2 py-0.5 text-sm font-bold text-pink-300">
+          {heading}
+        </span>
+        {/* Chevron rotates 90° when collapsed — CSS transition on transform. */}
+        <span
+          className="ml-2 text-xs text-pink-300/60 transition-transform duration-200"
+          style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
+        >
+          ▾
+        </span>
+      </button>
+      {/* max-height transition: animates open/close without knowing actual height.
+          The cap (9999px) is large enough for any outline section; the browser
+          animates to that value but the content clips it to its real height. */}
+      <div
+        className="overflow-hidden transition-all duration-300 ease-in-out"
+        style={{ maxHeight: open ? "9999px" : "0px" }}
+      >
+        {body && (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={outlineComponents}>
+            {body}
+          </ReactMarkdown>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OutlineRenderer({ content }: { content: string }) {
+  const sections = splitOutlineSections(fixMarkdown(content));
+
+  return (
+    <div>
+      {sections.map((section, i) =>
+        // Preamble (empty heading) renders directly without a collapsible wrapper.
+        section.heading === "" ? (
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={outlineComponents}>
+            {section.body}
+          </ReactMarkdown>
+        ) : (
+          <OutlineSection key={i} heading={section.heading} body={section.body} />
+        )
+      )}
+    </div>
+  );
+}
 
 
 // ChatPanel — middle column
@@ -1356,9 +1449,13 @@ function StudioPanel({
             // Podcast expanded view: audio player + script
             <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
           ) : expandedNote.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={expandedNote.type === "outline" ? outlineComponents : markdownComponents}>
-              {expandedNote.content}
-            </ReactMarkdown>
+            expandedNote.type === "outline" ? (
+              <OutlineRenderer content={expandedNote.content} />
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                {fixMarkdown(expandedNote.content)}
+              </ReactMarkdown>
+            )
           ) : (
             <p className="text-xs text-muted">No content yet.</p>
           )}
@@ -1566,9 +1663,13 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
       </div>
       {expanded && note.content && (
         <div className="border-t border-edge px-3 py-2 text-sm">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={note.type === "outline" ? outlineComponents : markdownComponents}>
-            {fixMarkdown(note.content)}
-          </ReactMarkdown>
+          {note.type === "outline" ? (
+            <OutlineRenderer content={note.content} />
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {fixMarkdown(note.content)}
+            </ReactMarkdown>
+          )}
         </div>
       )}
     </div>

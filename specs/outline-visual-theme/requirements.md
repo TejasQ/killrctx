@@ -65,12 +65,25 @@ All visual changes are isolated to outline note rendering. The generic
 - The outline theme applies in both the collapsed inline preview in NoteCard and
   the full expanded reading view.
 
+### REQ-006 — Collapsible H2 sections
+Each top-level H2 section in an outline can be collapsed and expanded by clicking
+its heading chip. Collapsing hides all content until the next H2 (or end of document).
+
+**Acceptance criteria:**
+- All H2 sections start expanded by default.
+- Clicking an H2 chip toggles its section content open/closed.
+- A collapse indicator (chevron or arrow) on the chip signals the current state.
+- Collapsing one section does not affect any other section.
+- The collapsed/expanded state is local to the render — it resets when the note
+  is closed and reopened.
+- Only H2 sections are collapsible; H3/H4 headings are not interactive.
+
 ---
 
 ## Out of scope
 
-- Section folding / accordion collapse (interactive hierarchy navigation).
 - Sticky breadcrumb showing current depth position while scrolling.
 - Exporting or copying the outline.
 - Any change to the Podcast, Summary, Mind Map, or Q&A note types.
 - Changes to the in-flight streaming preview (it uses the generic components).
+- Persisting collapsed/expanded state across sessions.

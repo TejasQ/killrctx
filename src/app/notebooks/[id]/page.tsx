@@ -31,7 +31,7 @@
 
 "use client";
 
-import { use, useEffect, useRef, useState } from "react";
+import React, { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -745,6 +745,94 @@ const markdownComponents: Components = {
   hr: () => <hr className="my-3 border-edge" />,
 };
 
+// ============================================================================
+// outlineComponents — markdown renderer override for Outline notes only
+// ============================================================================
+//
+// _Basically_, an outline is a depth-first hierarchy and the visual design
+// should reinforce depth at a glance. We spread markdownComponents so tables,
+// code, blockquotes, etc. inherit their existing styles; we only replace the
+// five elements that carry structural meaning in an outline.
+//
+// Colors: amber (H2) → orange (H3) → rose (H4), with matching left-border
+// rails that get thinner at each level. Ordered-list items get a small pill
+// badge instead of a plain numeral so section numbers feel like landmarks.
+// ============================================================================
+const outlineComponents: Components = {
+  ...markdownComponents,
+
+  // H2 — inline text chip, rose.
+  h2: ({ children }) => (
+    <h2 className="mt-4 mb-1 first:mt-0">
+      <span className="inline-block rounded border border-rose-400/30 bg-rose-500/10 px-2 py-0.5 text-sm font-bold text-rose-300">
+        {children}
+      </span>
+    </h2>
+  ),
+
+  // H3 — inline text chip, teal.
+  h3: ({ children }) => (
+    <h3 className="mt-3 mb-1">
+      <span className="inline-block rounded border border-teal-400/25 bg-teal-500/10 px-2 py-0.5 text-sm font-semibold text-teal-300">
+        {children}
+      </span>
+    </h3>
+  ),
+
+  // H4 — inline text chip, indigo.
+  h4: ({ children }) => (
+    <h4 className="mt-2 mb-0.5">
+      <span className="inline-block rounded border border-indigo-400/20 bg-indigo-500/10 px-2 py-0.5 text-xs font-semibold text-indigo-300">
+        {children}
+      </span>
+    </h4>
+  ),
+
+  // ol — connector line runs down the left side of the list, linking items
+  // back to their parent heading visually. Also injects data-idx onto each
+  // <li> for pill badges (counting only valid elements to avoid the ×2 skip
+  // caused by whitespace text nodes between tags).
+  ol: ({ children }) => {
+    let elementCount = 0;
+    return (
+      <ol className="mb-2 space-y-1 border-l border-zinc-700/50 pl-3 ml-3">
+        {React.Children.map(children, (child) => {
+          if (!React.isValidElement(child)) return child;
+          elementCount += 1;
+          return React.cloneElement(
+            child as React.ReactElement<{ "data-idx": number }>,
+            { "data-idx": elementCount },
+          );
+        })}
+      </ol>
+    );
+  },
+
+  // ul — same connector line treatment as ol, without the index injection.
+  ul: ({ children }) => (
+    <ul className="mb-2 space-y-1 border-l border-zinc-700/50 pl-3 ml-3">{children}</ul>
+  ),
+
+  // li — amber pill badge for numbered items (ol); teal dot for bullets (ul).
+  // data-idx is injected by the ol renderer above; its absence means we're
+  // inside a ul, so we show a small teal dot instead.
+  li: ({ children, ...rest }) => {
+    const n = (rest as Record<string, unknown>)["data-idx"];
+    return (
+      <li className="flex items-start gap-2">
+        {typeof n === "number" ? (
+          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-zinc-500/20 text-[10px] font-semibold text-zinc-400">
+            {n}
+          </span>
+        ) : (
+          <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500/60" />
+        )}
+        <span className="flex-1">{children}</span>
+      </li>
+    );
+  },
+};
+
 
 // ChatPanel — middle column
 // ============================================================================
@@ -1268,7 +1356,7 @@ function StudioPanel({
             // Podcast expanded view: audio player + script
             <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
           ) : expandedNote.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={expandedNote.type === "outline" ? outlineComponents : markdownComponents}>
               {expandedNote.content}
             </ReactMarkdown>
           ) : (
@@ -1478,7 +1566,7 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
       </div>
       {expanded && note.content && (
         <div className="border-t border-edge px-3 py-2 text-sm">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={note.type === "outline" ? outlineComponents : markdownComponents}>
             {fixMarkdown(note.content)}
           </ReactMarkdown>
         </div>

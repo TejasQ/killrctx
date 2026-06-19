@@ -51,8 +51,12 @@ const NOTE_PROMPTS: Record<NoteType, string> = {
     "Use nested markdown lists (- item, indent child items with two spaces). " +
     "Do not use any other formatting.",
   outline:
-    "Write a structured outline of the topics covered in the sources. " +
-    "Use markdown headings (##, ###) and numbered lists.",
+    "Write a structured hierarchical outline of the topics covered in the sources. " +
+    "Use exactly three levels of structure:\n" +
+    "  ## Roman numeral headings (## I, ## II, ## III …) for top-level sections.\n" +
+    "  ### Letter headings (### A, ### B, ### C …) for subsections under each Roman numeral.\n" +
+    "  Numbered lists (1. 2. 3.) for detail points under each letter heading.\n" +
+    "Use only headings and numbered list items — no prose paragraphs, no bullet points.",
   qa:
     "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
     "Format each pair as:\n**Q: ...?**\nA: ...",

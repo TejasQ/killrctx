@@ -51,8 +51,14 @@ const NOTE_PROMPTS: Record<NoteType, string> = {
     "Use nested markdown lists (- item, indent child items with two spaces). " +
     "Do not use any other formatting.",
   outline:
-    "Write a structured outline of the topics covered in the sources. " +
-    "Use markdown headings (##, ###) and numbered lists.",
+    "Write a structured hierarchical outline of the topics covered in the sources. " +
+    "Begin with a single H1 title (# Title) that names the subject of the outline in plain English — no filler phrases like 'Structured Outline of'. " +
+    "Then use exactly four levels of structure:\n" +
+    "  ## Roman numeral headings (## I, ## II, ## III …) for top-level sections.\n" +
+    "  ### Letter headings (### A, ### B, ### C …) for subsections under each Roman numeral.\n" +
+    "  #### Named subject headings (#### Name) for any distinct entity, person, or concept that has multiple detail points — only use this level when a subject has more than one detail worth listing.\n" +
+    "  Numbered lists (1. 2. 3.) for detail points. Place them under the most specific heading they belong to.\n" +
+    "Use only the H1 title, headings, and numbered list items — no prose paragraphs, no bullet points.",
   qa:
     "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
     "Format each pair as:\n**Q: ...?**\nA: ...",
@@ -92,7 +98,7 @@ export async function POST(
 
   const qc = buildQueryConfig(notebook, selectedFilenames);
   const base = NOTE_PROMPTS[noteType];
-  const prompt = topic ? `${base} Focus on: ${topic}.` : base;
+  const prompt = topic ? `Focus specifically on: ${topic}.\n\n${base}` : base;
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -120,12 +126,13 @@ export async function POST(
         const now = Date.now();
         const noteId = uuid();
         db.prepare(
-          "INSERT INTO notes (id, notebook_id, type, title, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO notes (id, notebook_id, type, title, topic, content, response_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
           noteId,
           id,
           noteType,
           title?.trim() || DEFAULT_TITLES[noteType](new Date(now).toLocaleDateString()),
+          topic?.trim() || null,
           assembled,
           responseId,
           now,

@@ -94,6 +94,7 @@ export type Note = {
   notebook_id: string;
   type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
   title: string;
+  topic: string | null;        // optional focus the user typed before generating
   content: string | null;      // AI-generated markdown; null while podcast is in-flight
   response_id: string | null;  // OpenRAG chatId — used to clean up the thread on delete
   status: "pending" | "scripting" | "synthesizing" | "ready" | "failed" | null; // podcast only
@@ -199,13 +200,16 @@ function getDb(): Database.Database {
     // notebooks table doesn't exist yet — CREATE TABLE below includes the columns.
   }
 
-  // Add response_id to notes if it was created before that column existed.
+  // Add response_id and topic to notes if created before those columns existed.
   try {
     const noteCols = conn
       .prepare("PRAGMA table_info(notes)")
       .all() as { name: string }[];
     if (noteCols.length > 0 && !noteCols.some((c) => c.name === "response_id")) {
       conn.exec("ALTER TABLE notes ADD COLUMN response_id TEXT");
+    }
+    if (noteCols.length > 0 && !noteCols.some((c) => c.name === "topic")) {
+      conn.exec("ALTER TABLE notes ADD COLUMN topic TEXT");
     }
   } catch {
     // notes table doesn't exist yet — CREATE TABLE below handles it.
@@ -261,6 +265,7 @@ function getDb(): Database.Database {
       notebook_id TEXT    NOT NULL,
       type        TEXT    NOT NULL,
       title       TEXT    NOT NULL,
+      topic       TEXT,
       content     TEXT,
       response_id TEXT,
       status      TEXT,

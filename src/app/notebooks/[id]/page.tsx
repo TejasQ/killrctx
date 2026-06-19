@@ -31,7 +31,7 @@
 
 "use client";
 
-import { use, useEffect, useRef, useState } from "react";
+import React, { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -53,6 +53,7 @@ type Note = {
   id: string;
   type: "podcast" | "summary" | "mindmap" | "outline" | "qa";
   title: string;
+  topic: string | null;
   content: string | null;
   status: "pending" | "scripting" | "synthesizing" | "ready" | "failed" | null;
   audio_url: string | null;
@@ -745,6 +746,213 @@ const markdownComponents: Components = {
   hr: () => <hr className="my-3 border-edge" />,
 };
 
+// ============================================================================
+// outlineComponents — markdown renderer override for Outline notes only
+// ============================================================================
+//
+// _Basically_, an outline is a depth-first hierarchy and the visual design
+// should reinforce depth at a glance. We spread markdownComponents so tables,
+// code, blockquotes, etc. inherit their existing styles; we only replace the
+// five elements that carry structural meaning in an outline.
+//
+// Hierarchy is legible from type alone (works in grayscale):
+//   L1 (H2) — only filled pill in the document; ~18px / weight-600
+//   L2 (H3) — plain text, near-white; ~15px / weight-600
+//   L3 (H4) — bold medium-gray text; ~13.5px / weight-600
+//   L4 (ol) — small numbered badge + normal body text; ~13px / weight-400
+//
+// Color ramp is monochrome: bright surface (L1) → bright text (L2) →
+// medium-gray text (L3) → normal body (L4). No hue is used for hierarchy —
+// the app's accent (#7c5cff violet) is reserved for interactive elements only.
+//
+// Spacing encodes grouping: gap between siblings at level N is always wider
+// than the gap from a parent to its first child, so items "cluster" visually.
+//
+// A faint 1px vertical rail (rgba white 8%) on ol/ul containers acts as a
+// wayfinding guide through deep nesting without reading as a divider.
+// ============================================================================
+const outlineComponents: Components = {
+  ...markdownComponents,
+
+  // H1 — document title. Large, white, no chip.
+  h1: ({ children }) => (
+    <h1 className="mb-4 text-xl font-bold text-white">{children}</h1>
+  ),
+
+  // H2 — L1 category. The ONLY filled pill in the outline.
+  // Neutral raised surface (white/8% on the dark panel bg). Near-white label.
+  // No saturated color — the pill reads as "elevated", not "interactive".
+  // mt-8 (~32px) is the largest gap in the document — signals a new section.
+  h2: ({ children }) => (
+    <h2 className="mt-8 mb-1 first:mt-0">
+      <span className="inline-block rounded bg-white/[0.08] px-2.5 py-1 text-[18px] leading-[1.2] font-semibold text-white">
+        {children}
+      </span>
+    </h2>
+  ),
+
+  // H3 — L2 hero/subsection. Plain text only — no fill, no border, no decoration.
+  // Size (~15px) + spacing (~20px top margin) carry the level signal alone.
+  h3: ({ children }) => (
+    <h3 className="mt-5 mb-1 text-[15px] font-semibold text-white">
+      {children}
+    </h3>
+  ),
+
+  // H4 — L3 ability name. Medium-gray bold text — dimmer than L2, heavier than L4.
+  // white/70 is not a link color (accent is violet); no interactivity implied.
+  // mt-3.5 (~14px) separates abilities; mb-0 so the first L4 step sits tight
+  // beneath it (the ol's own mt handles the 4px parent→child gap).
+  h4: ({ children }) => (
+    <h4 className="mt-3.5 mb-0 text-[13.5px] font-semibold text-white/70">
+      {children}
+    </h4>
+  ),
+
+  // ol — L4 detail steps. mt-1 (~4px) keeps steps attached to their L3 parent.
+  // space-y-0.5 (~2px) between consecutive steps.
+  // Faint 1px left rail is a wayfinding guide, not a divider.
+  // Injects data-idx so the li renderer can show numbered badges.
+  ol: ({ children }) => {
+    let elementCount = 0;
+    return (
+      <ol className="mt-1 mb-3 space-y-0.5 border-l border-white/[0.08] pl-5 ml-5">
+        {React.Children.map(children, (child) => {
+          if (!React.isValidElement(child)) return child;
+          elementCount += 1;
+          return React.cloneElement(
+            child as React.ReactElement<{ "data-idx": number }>,
+            { "data-idx": elementCount },
+          );
+        })}
+      </ol>
+    );
+  },
+
+  // ul — same rail treatment as ol, without index injection.
+  ul: ({ children }) => (
+    <ul className="mt-1 mb-3 space-y-0.5 border-l border-white/[0.08] pl-5 ml-5">{children}</ul>
+  ),
+
+  // li — small numbered badge for ol items; faint dot for ul items.
+  // text-[13px] / weight-400 keeps L4 steps clearly lighter than L3 headers.
+  li: ({ children, ...rest }) => {
+    const n = (rest as Record<string, unknown>)["data-idx"];
+    return (
+      <li className="flex items-start gap-2 text-[13px] font-normal">
+        {typeof n === "number" ? (
+          <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-zinc-600/30 text-[10px] font-semibold text-zinc-300">
+            {n}
+          </span>
+        ) : (
+          <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500/60" />
+        )}
+        <span className="flex-1">{children}</span>
+      </li>
+    );
+  },
+};
+
+// ============================================================================
+// OutlineRenderer — collapsible section renderer for Outline notes
+// ============================================================================
+//
+// _Basically_, ReactMarkdown renders nodes in isolation so an h2 renderer
+// can't reach its following siblings to hide them. Instead we split the raw
+// markdown string into { heading, body } pairs by H2 boundary first, then
+// render each pair as a self-contained accordion item with its own useState.
+// ============================================================================
+
+type OutlineSection = { heading: string; body: string };
+
+// Split markdown into sections at every `## ` boundary.
+// Lines before the first H2 land in a section with an empty heading.
+function splitOutlineSections(markdown: string): OutlineSection[] {
+  const lines = markdown.split("\n");
+  const sections: OutlineSection[] = [];
+  let currentHeading = "";
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      // Flush the previous section before starting a new one.
+      sections.push({ heading: currentHeading, body: currentLines.join("\n").trim() });
+      currentHeading = line.slice(3).trim(); // strip the "## " prefix
+      currentLines = [];
+    } else {
+      currentLines.push(line);
+    }
+  }
+  // Flush the final section.
+  sections.push({ heading: currentHeading, body: currentLines.join("\n").trim() });
+
+  return sections;
+}
+
+function OutlineSection({ heading, body }: OutlineSection) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div>
+      {/* Clickable L1 pill — matches outlineComponents.h2 neutral surface style,
+          plus an explicit chevron so the collapse affordance is unambiguous.
+          No saturated color; the pill reads "elevated", not "interactive". */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="mt-8 mb-1 flex w-full items-center justify-between first:mt-0"
+      >
+        <span className="inline-flex items-center gap-1.5 rounded bg-white/[0.08] px-2.5 py-1 text-[18px] leading-[1.2] font-semibold text-white">
+          {heading}
+        </span>
+        {/* Chevron: explicit caret so users know this is a collapse control. */}
+        <svg
+          className="ml-2 h-4 w-4 shrink-0 text-white/40 transition-transform duration-200"
+          style={{ transform: open ? "rotate(0deg)" : "rotate(-90deg)" }}
+          viewBox="0 0 16 16"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M4.5 6 L8 10 L11.5 6" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {/* max-height transition: animates open/close without knowing actual height.
+          9999px cap is large enough for any section; browser clips to real height.
+          No tint — the section body uses the panel background unchanged. */}
+      <div
+        className="overflow-hidden transition-all duration-300 ease-in-out"
+        style={{ maxHeight: open ? "9999px" : "0px" }}
+      >
+        {body && (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={outlineComponents}>
+            {body}
+          </ReactMarkdown>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OutlineRenderer({ content, topic }: { content: string; topic?: string | null }) {
+  const sections = splitOutlineSections(fixMarkdown(content));
+
+  return (
+    <div>
+      {topic && (
+        <p className="mb-3 text-xs text-muted">Focus: {topic}</p>
+      )}
+      {sections.map((section, i) =>
+        // Preamble (empty heading) renders directly without a collapsible wrapper.
+        section.heading === "" ? (
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={outlineComponents}>
+            {section.body}
+          </ReactMarkdown>
+        ) : (
+          <OutlineSection key={i} heading={section.heading} body={section.body} />
+        )
+      )}
+    </div>
+  );
+}
+
 
 // ChatPanel — middle column
 // ============================================================================
@@ -1086,11 +1294,11 @@ function ChatPanel({
 // dedicated route; the rest go through /notes/<type>.
 // ============================================================================
 const NOTE_TYPES = [
-  { type: "podcast",  label: "Podcast",  icon: "🎙", color: "bg-cyan-500/10    border-cyan-500/20    hover:border-cyan-400/50    hover:bg-cyan-500/15",    activeColor: "border-cyan-400/70    bg-cyan-500/20    shadow-[0_0_12px_rgba(34,211,238,0.15)]",    route: (id: string) => `/api/notebooks/${id}/podcast` },
-  { type: "summary",  label: "Summary",  icon: "☰",  color: "bg-fuchsia-500/10 border-fuchsia-500/20 hover:border-fuchsia-400/50 hover:bg-fuchsia-500/15", activeColor: "border-fuchsia-400/70 bg-fuchsia-500/20 shadow-[0_0_12px_rgba(217,70,239,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/summary` },
-  { type: "mindmap",  label: "Mind Map", icon: "✦",  color: "bg-violet-500/10  border-violet-500/20  hover:border-violet-400/50  hover:bg-violet-500/15",  activeColor: "border-violet-400/70  bg-violet-500/20  shadow-[0_0_12px_rgba(139,92,246,0.15)]",  route: (id: string) => `/api/notebooks/${id}/notes/mindmap` },
-  { type: "outline",  label: "Outline",  icon: "≡",  color: "bg-pink-500/10    border-pink-500/20    hover:border-pink-400/50    hover:bg-pink-500/15",    activeColor: "border-pink-400/70    bg-pink-500/20    shadow-[0_0_12px_rgba(236,72,153,0.15)]",    route: (id: string) => `/api/notebooks/${id}/notes/outline` },
-  { type: "qa",       label: "Q&A",      icon: "?",  color: "bg-indigo-500/10  border-indigo-500/20  hover:border-indigo-400/50  hover:bg-indigo-500/15",  activeColor: "border-indigo-400/70  bg-indigo-500/20  shadow-[0_0_12px_rgba(99,102,241,0.15)]",   route: (id: string) => `/api/notebooks/${id}/notes/qa` },
+  { type: "podcast",  label: "Podcast",  icon: "🎙", color: "bg-pink-500/20   border-pink-500/40   hover:border-pink-400/70   hover:bg-pink-500/30",   activeColor: "border-pink-400/90   bg-pink-500/40   shadow-[0_0_16px_rgba(236,72,153,0.3)]",   route: (id: string) => `/api/notebooks/${id}/podcast` },
+  { type: "summary",  label: "Summary",  icon: "☰",  color: "bg-purple-500/20 border-purple-500/40 hover:border-purple-400/70 hover:bg-purple-500/30", activeColor: "border-purple-400/90 bg-purple-500/40 shadow-[0_0_16px_rgba(168,85,247,0.3)]",  route: (id: string) => `/api/notebooks/${id}/notes/summary` },
+  { type: "mindmap",  label: "Mind Map", icon: "✦",  color: "bg-blue-500/20   border-blue-500/40   hover:border-blue-400/70   hover:bg-blue-500/30",   activeColor: "border-blue-400/90   bg-blue-500/40   shadow-[0_0_16px_rgba(59,130,246,0.3)]",   route: (id: string) => `/api/notebooks/${id}/notes/mindmap` },
+  { type: "outline",  label: "Outline",  icon: "≡",  color: "bg-sky-500/20    border-sky-500/40    hover:border-sky-400/70    hover:bg-sky-500/30",    activeColor: "border-sky-400/90    bg-sky-500/40    shadow-[0_0_16px_rgba(14,165,233,0.3)]",    route: (id: string) => `/api/notebooks/${id}/notes/outline` },
+  { type: "qa",       label: "Q&A",      icon: "?",  color: "bg-indigo-500/20 border-indigo-500/40 hover:border-indigo-400/70 hover:bg-indigo-500/30", activeColor: "border-indigo-400/90 bg-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.3)]",  route: (id: string) => `/api/notebooks/${id}/notes/qa` },
 ] as const;
 
 type NoteTypeKey = (typeof NOTE_TYPES)[number]["type"];
@@ -1268,9 +1476,13 @@ function StudioPanel({
             // Podcast expanded view: audio player + script
             <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
           ) : expandedNote.content ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {expandedNote.content}
-            </ReactMarkdown>
+            expandedNote.type === "outline" ? (
+              <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                {fixMarkdown(expandedNote.content)}
+              </ReactMarkdown>
+            )
           ) : (
             <p className="text-xs text-muted">No content yet.</p>
           )}
@@ -1478,9 +1690,13 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
       </div>
       {expanded && note.content && (
         <div className="border-t border-edge px-3 py-2 text-sm">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-            {fixMarkdown(note.content)}
-          </ReactMarkdown>
+          {note.type === "outline" ? (
+            <OutlineRenderer content={note.content} topic={note.topic} />
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {fixMarkdown(note.content)}
+            </ReactMarkdown>
+          )}
         </div>
       )}
     </div>

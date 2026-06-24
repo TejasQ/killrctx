@@ -47,9 +47,24 @@ const NOTE_PROMPTS: Record<NoteType, string> = {
     "Write a concise prose summary of the key information in the sources. " +
     "Focus on the most important facts, themes, and conclusions.",
   mindmap:
-    "Create a hierarchical mind map of the key concepts in the sources. " +
-    "Use nested markdown lists (- item, indent child items with two spaces). " +
-    "Do not use any other formatting.",
+    "Create a mind map of the key concepts in the sources.\n" +
+    "Output ONLY a nested markdown list in exactly this format — nothing else:\n" +
+    "\n" +
+    "- Root Topic\n" +
+    "  - Branch One\n" +
+    "    - Sub-branch A\n" +
+    "      - Leaf Detail\n" +
+    "    - Sub-branch B\n" +
+    "  - Branch Two\n" +
+    "    - Sub-branch C\n" +
+    "      - Leaf Detail\n" +
+    "\n" +
+    "Strict constraints:\n" +
+    "- Every item is 1–5 words. No sentences. No punctuation at the end.\n" +
+    "- Use exactly two spaces per indent level. Use all 4 levels (root, branch, sub-branch, leaf).\n" +
+    "- Each branch or sub-branch has 3–5 children. No flat lists.\n" +
+    "- No source names, citations, document titles, or parenthetical notes.\n" +
+    "- No prose, headings, blank lines, or any text outside the list.",
   outline:
     "Write a structured hierarchical outline of the topics covered in the sources. " +
     "Begin with a single H1 title (# Title) that names the subject of the outline in plain English — no filler phrases like 'Structured Outline of'. " +

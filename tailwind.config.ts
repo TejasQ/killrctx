@@ -11,6 +11,10 @@ const config: Config = {
         muted: "#8a8a92",
         accent: "#7c5cff",
       },
+      height: {
+        "mindmap-card":     "300px", // inline NoteCard preview
+        "mindmap-expanded": "500px", // full Studio expanded view
+      },
       keyframes: {
         rainbow: {
           "0%": { backgroundPosition: "0% center" },

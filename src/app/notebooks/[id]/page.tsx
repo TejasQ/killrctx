@@ -87,7 +87,7 @@ export default function NotebookPage({
   // Set by handleNodeClick after creating a new conversation; consumed by ChatPanel.
   const [pendingAsk, setPendingAsk] = useState<string | null>(null);
   // Picker state: shown when a node has multiple linked conversations to choose from.
-  const [nodePickerState, setNodePickerState] = useState<{ label: string; convIds: string[]; noteId: string; noteTopic: string | null } | null>(null);
+  const [nodePickerState, setNodePickerState] = useState<{ label: string; convIds: string[]; noteId: string; noteTopic: string | null; ancestorLabels: string[] } | null>(null);
   // Doc IDs the user has checked in the Sources panel. Empty = all docs in scope.
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
@@ -155,18 +155,31 @@ export default function NotebookPage({
   }
 
   // frameQuestion builds the contextual question string sent to chat.
-  // Kept at the NotebookPage level so createAndLink can use it.
-  function frameQuestion(label: string, topic: string | null | undefined): string {
-    if (topic?.trim()) {
-      return `Tell me more about "${label}" in the context of ${topic.trim()}.`;
-    }
-    return `Tell me more about "${label}".`;
+  // Includes an ancestor breadcrumb so the LLM knows where in the map the node
+  // lives — e.g. "under: Berserker Korg > Abilities > Reckless Attack".
+  function frameQuestion(
+    label:          string,
+    ancestorLabels: string[],
+    topic:          string | null | undefined,
+  ): string {
+    const breadcrumb = ancestorLabels.length > 0
+      ? ` (under: ${ancestorLabels.join(" > ")})`
+      : "";
+    const context = topic?.trim()
+      ? ` in the context of ${topic.trim()}`
+      : "";
+    return `Tell me more about "${label}"${breadcrumb}${context}.`;
   }
 
   // createAndLink: creates a new conversation for a node, sends the framed
   // question, and writes the mind_map_links record. Called on the first click
   // of an unlinked node or when the user picks "New conversation" in the picker.
-  const createAndLink = useCallback(async (nodeLabel: string, noteId: string, noteTopic: string | null) => {
+  const createAndLink = useCallback(async (
+    nodeLabel:      string,
+    noteId:         string,
+    noteTopic:      string | null,
+    ancestorLabels: string[],
+  ) => {
     const convRes = await fetch(`/api/notebooks/${id}/conversations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -181,7 +194,7 @@ export default function NotebookPage({
 
     // Queue the framed question — ChatPanel's useEffect will send it once
     // activeConvId is committed to state.
-    setPendingAsk(frameQuestion(nodeLabel, noteTopic));
+    setPendingAsk(frameQuestion(nodeLabel, ancestorLabels, noteTopic));
 
     // Persist the link record.
     const linkRes = await fetch(`/api/notebooks/${id}/mind-map-links`, {
@@ -199,19 +212,20 @@ export default function NotebookPage({
   // Decides whether to create a new conversation, reopen an existing one, or
   // show the picker when multiple conversations are linked to the same node.
   const handleNodeClick = useCallback((
-    nodeLabel: string,
-    linkedConvIds: string[],
-    noteId: string,
-    noteTopic: string | null,
+    nodeLabel:      string,
+    linkedConvIds:  string[],
+    noteId:         string,
+    noteTopic:      string | null,
+    ancestorLabels: string[],
   ) => {
     if (linkedConvIds.length === 0) {
-      void createAndLink(nodeLabel, noteId, noteTopic);
+      void createAndLink(nodeLabel, noteId, noteTopic, ancestorLabels);
     } else if (linkedConvIds.length === 1) {
       // One conversation — jump straight to it.
       setActiveConvId(linkedConvIds[0]);
     } else {
       // Multiple conversations — let the user pick.
-      setNodePickerState({ label: nodeLabel, convIds: linkedConvIds, noteId, noteTopic });
+      setNodePickerState({ label: nodeLabel, convIds: linkedConvIds, noteId, noteTopic, ancestorLabels });
     }
   }, [createAndLink]);
   useEffect(() => {
@@ -396,7 +410,7 @@ export default function NotebookPage({
         conversations={conversations}
         onSelect={(convId) => { setActiveConvId(convId); setNodePickerState(null); }}
         onNew={() => {
-          void createAndLink(nodePickerState.label, nodePickerState.noteId, nodePickerState.noteTopic);
+          void createAndLink(nodePickerState.label, nodePickerState.noteId, nodePickerState.noteTopic, nodePickerState.ancestorLabels);
           setNodePickerState(null);
         }}
         onClose={() => setNodePickerState(null)}
@@ -1498,7 +1512,7 @@ function StudioPanel({
   notebookId: string;
   notes: Note[];
   mindMapLinks: MindMapLink[];
-  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null) => void;
+  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
   onCreated: () => void;
   onDeleted: () => void;
   onExpandChange: (expanded: boolean) => void;
@@ -1678,10 +1692,10 @@ function StudioPanel({
           variant={expandedFullscreen ? "fullscreen" : "expanded"}
           noteId={expandedNote.id}
           mindMapLinks={mindMapLinks}
-          onNodeClick={(label, convIds) => {
+          onNodeClick={(label, convIds, ancestors) => {
             // For fullscreen: close first, then fire inquiry (REQ-005).
             if (expandedFullscreen) setExpandedFullscreen(false);
-            onNodeClick(label, convIds, expandedNote.id, expandedNote.topic);
+            onNodeClick(label, convIds, expandedNote.id, expandedNote.topic, ancestors);
           }}
         />
       </div>
@@ -1902,7 +1916,7 @@ function NoteCard({
 }: {
   note: Note;
   mindMapLinks: MindMapLink[];
-  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null) => void;
+  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
   onDelete: () => void;
   onExpand: () => void;
 }) {
@@ -1930,10 +1944,10 @@ function NoteCard({
           variant={inFullscreen ? "fullscreen" : "card"}
           noteId={note.id}
           mindMapLinks={mindMapLinks}
-          onNodeClick={(label, convIds) => {
+          onNodeClick={(label, convIds, ancestors) => {
             // For fullscreen: exit before firing (REQ-005).
             if (inFullscreen) setFullscreen(false);
-            onNodeClick(label, convIds, note.id, note.topic);
+            onNodeClick(label, convIds, note.id, note.topic, ancestors);
           }}
         />
       );

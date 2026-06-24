@@ -26,15 +26,17 @@ Clicking a mind map node opens a conversation tied to that node in the chat pane
 
 ### REQ-002 — Question is contextually framed
 
-The question sent to chat is not just the bare node label. It is framed using the
-mind-map's topic (if one was set at generation time) so the answer is grounded in the
-right context.
+The question sent to chat is not just the bare node label. It is framed using the full
+ancestor path (root → parent chain) and, if available, the mind-map topic so the LLM
+has complete context about where in the map the node lives.
 
 **Acceptance criteria:**
-- If the note has a topic (e.g. "Berserker Korg"), the sent question reads:
-  `Tell me more about "[node label]" in the context of [topic].`
-- If no topic is set, it reads:
-  `Tell me more about "[node label]".`
+- The framed question includes the ancestor chain as readable breadcrumb context so
+  that clicking "Attack Roll: d20" under "Reckless Attack → Abilities → Berserker Korg"
+  produces a question like:
+  `Tell me more about "Attack Roll: d20" (under: Berserker Korg > Abilities > Reckless Attack) in the context of Berserker Korg.`
+- If the clicked node is at the root level (no ancestors), the `(under: …)` part is omitted.
+- If no topic is set, the `in the context of …` suffix is omitted.
 - The framed question appears as the user's message in the chat panel (visible in the
   transcript), not as a hidden system prompt.
 

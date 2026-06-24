@@ -341,7 +341,7 @@ function buildGraph(
   root:          TreeNode,
   collapsedIds:  Set<string>,
   onToggle:      (id: string) => void,
-  onAsk:         (label: string) => void,
+  onAsk:         (id: string, label: string) => void,
   linksByLabel:  Map<string, string[]>,
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
@@ -395,7 +395,8 @@ function buildGraph(
         label,
         style: ns,
         // onClick is called by MindMapGraph's handleNodeClick.
-        ...(!tn.isSource && { onClick: () => onAsk(tn.label) }),
+        // Pass id so handleAskRef can resolve ancestor labels from the tree root.
+        ...(!tn.isSource && { onClick: () => onAsk(tn.id, tn.label) }),
       },
     });
 
@@ -463,6 +464,20 @@ function findNode(root: TreeNode, id: string): TreeNode | null {
   return null;
 }
 
+// ── findAncestorLabels ────────────────────────────────────────────────────────
+// Returns the labels of every ancestor of `targetId`, from root down to (but
+// NOT including) the target itself.  Used to build the breadcrumb context that
+// gets included in the framed question so the LLM knows e.g. that
+// "Attack Roll: d20" lives under "Reckless Attack → Abilities → Berserker Korg".
+function findAncestorLabels(root: TreeNode, targetId: string, path: string[] = []): string[] | null {
+  if (root.id === targetId) return path;
+  for (const child of root.children) {
+    const result = findAncestorLabels(child, targetId, [...path, root.label]);
+    if (result !== null) return result;
+  }
+  return null;
+}
+
 // ── MindMapGraph ──────────────────────────────────────────────────────────────
 // Inner component — needs to live inside ReactFlowProvider to use useReactFlow.
 // Owns the collapse state and drives the fly-in / fly-out animation.
@@ -481,7 +496,7 @@ function MindMapGraph({
   tree:         TreeNode;
   variant:      "card" | "expanded" | "fullscreen";
   linksByLabel: Map<string, string[]>;
-  onNodeClick:  (label: string, linkedConvIds: string[]) => void;
+  onNodeClick:  (label: string, linkedConvIds: string[], ancestorLabels: string[]) => void;
 }) {
   const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
@@ -494,14 +509,14 @@ function MindMapGraph({
 
   // Keep toggle and ask refs so buildGraph closures always call the latest.
   const handleToggleRef = useRef<(id: string) => void>(() => {});
-  const handleAskRef    = useRef<(label: string) => void>(() => {});
+  const handleAskRef    = useRef<(id: string, label: string) => void>(() => {});
 
   const { nodes: baseNodes, edges: baseEdges } = useMemo(
     () => buildGraph(
       tree,
       collapsedIds,
       (id) => handleToggleRef.current(id),
-      (label) => handleAskRef.current(label),
+      (id, label) => handleAskRef.current(id, label),
       linksByLabel,
     ),
     [tree, collapsedIds, linksByLabel],
@@ -556,7 +571,7 @@ function MindMapGraph({
           tree,
           nextCollapsed,
           (nid) => handleToggleRef.current(nid),
-          (label) => handleAskRef.current(label),
+          (id, label) => handleAskRef.current(id, label),
           linksByLabel,
         );
         const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
@@ -628,7 +643,7 @@ function MindMapGraph({
         tree,
         nextCollapsed,
         (nid) => handleToggleRef.current(nid),
-        (label) => handleAskRef.current(label),
+        (id, label) => handleAskRef.current(id, label),
         linksByLabel,
       );
 
@@ -669,9 +684,12 @@ function MindMapGraph({
 
   // Keep refs in sync so buildGraph closures always call the latest handlers.
   handleToggleRef.current = handleToggle;
-  handleAskRef.current = (label: string) => {
-    const linkedConvIds = linksByLabel.get(label) ?? [];
-    onNodeClick(label, linkedConvIds);
+  handleAskRef.current = (id: string, label: string) => {
+    const linkedConvIds   = linksByLabel.get(label) ?? [];
+    // Walk the tree to build the breadcrumb path so frameQuestion can include
+    // e.g. "under: Berserker Korg > Abilities > Reckless Attack".
+    const ancestorLabels  = findAncestorLabels(tree, id) ?? [];
+    onNodeClick(label, linkedConvIds, ancestorLabels);
   };
 
   const handleNodeClick = useCallback(
@@ -725,7 +743,7 @@ export default function MindMapRenderer({
   variant:      "card" | "expanded" | "fullscreen";
   noteId:       string;
   mindMapLinks?: MindMapLink[];
-  onNodeClick?: (nodeLabel: string, linkedConvIds: string[]) => void;
+  onNodeClick?: (nodeLabel: string, linkedConvIds: string[], ancestorLabels: string[]) => void;
 }) {
   const tree = useMemo(() => parseMindMap(content), [content]);
 

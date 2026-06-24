@@ -15,3 +15,4 @@
 - [x] TASK-11: [UI] Add `NodePickerPopover` component + `nodePickerState` to `NotebookPage`
 - [x] TASK-12: [UI] Scrub `mindMapLinks` on conversation delete in the `onConvDeleted` handler in `NotebookPage`
 - [x] TASK-13: [UI] Thread `onNodeClick` through `StudioPanel` → `NoteCard` → all `MindMapRenderer` call sites; wrap with `setFullscreen(false)` in the fullscreen context
+- [x] TASK-14: [UI] Ancestor-path framing — add `findAncestorLabels()` to `MindMapRenderer.tsx`; change `onAsk`/`onNodeClick` to carry `ancestorLabels: string[]`; update `frameQuestion` in `page.tsx` to include breadcrumb + topic

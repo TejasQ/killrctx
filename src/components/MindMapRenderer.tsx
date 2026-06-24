@@ -43,7 +43,7 @@ import "reactflow/dist/style.css";
 // ── Animation constant ────────────────────────────────────────────────────────
 // How long the fly-in / fly-out transition takes, in ms. Must match the CSS
 // transition duration on MindMapNode below.
-const ANIM_MS = 220;
+const ANIM_MS = 380;
 
 // ── MindMapNode ───────────────────────────────────────────────────────────────
 // Custom node type with handles ONLY on the left and right sides.
@@ -51,13 +51,16 @@ const ANIM_MS = 220;
 // the closest one — causing top/bottom connections on a horizontal layout.
 // This node eliminates top/bottom handles entirely so lines always go L→R.
 //
-// The transition property here is what drives the expand/collapse animation —
-// ReactFlow updates the node's `transform` (position) and we tween opacity/scale
-// via data.animStyle so the node appears to fly in or out of its parent.
+// The inner div handles opacity/scale for the fly-in and fly-out animations.
+// The outer wrapper (controlled by ReactFlow) handles position — its transition
+// is set via the node-level `style` prop during layout shifts so surviving nodes
+// glide to their new positions instead of snapping.
 function MindMapNode({ data }: NodeProps) {
   const style: React.CSSProperties = {
     ...data.style,
     position:   "relative",
+    // Animate opacity and scale for enter/exit. Transform is NOT here — that
+    // would conflict with ReactFlow's own translate on the outer wrapper.
     transition: `opacity ${ANIM_MS}ms ease, transform ${ANIM_MS}ms ease`,
     ...data.animStyle,
   };
@@ -415,6 +418,9 @@ function MindMapGraph({
   // animating: true while a collapse-out animation is in flight. Blocks
   // re-entrant toggles so two animations don't stomp each other.
   const animating = useRef(false);
+  // skipNextSync: set by collapse so the useEffect doesn't re-snap node
+  // positions after the animation — we handle the final state ourselves.
+  const skipNextSync = useRef(false);
 
   // Build the stable (non-animated) graph for the current collapse state.
   // We keep a ref to the last toggle callback so buildGraph doesn't need to
@@ -426,9 +432,15 @@ function MindMapGraph({
     [tree, collapsedIds],
   );
 
-  // Sync ReactFlow internal state whenever the base graph changes.
-  // (Initial mount and after each animate-out completes.)
+  // Sync ReactFlow internal state on initial mount and whenever baseNodes
+  // changes for reasons other than a collapse animation (e.g. expand finish,
+  // tree content change). Collapse manages its own final state to avoid the
+  // two-step jerk caused by this sync firing mid-animation.
   useEffect(() => {
+    if (skipNextSync.current) {
+      skipNextSync.current = false;
+      return;
+    }
     setNodes(baseNodes);
     setEdges(baseEdges);
   }, [baseNodes, baseEdges, setNodes, setEdges]);
@@ -440,42 +452,103 @@ function MindMapGraph({
 
     if (isCollapsing) {
       // ── Collapse animation ────────────────────────────────────────────────
-      // 1. Find all descendant ids that are currently visible.
-      // 2. Find the parent's current position in the live ReactFlow nodes.
-      // 3. Move all descendants to the parent's position with opacity 0 /
-      //    scale 0 — CSS transition plays the fly-in-reverse.
-      // 4. After ANIM_MS, commit the new collapsed state (nodes disappear).
+      // 1. Animate departing nodes flying back into the parent (scale 0, opacity 0).
+      // 2. After ANIM_MS, remove them from ReactFlow directly — no layout
+      //    recalculation fires mid-animation, so surviving nodes don't jump.
+      // 3. Update collapsedIds (skipNextSync prevents the useEffect from
+      //    re-snapping positions — we already have the right state).
       animating.current = true;
 
-      const subtreeRoot = findNode(tree, id);
-      const departing   = subtreeRoot ? collectDescendantIds(subtreeRoot) : [];
+      const subtreeRoot  = findNode(tree, id);
+      const departing    = subtreeRoot ? collectDescendantIds(subtreeRoot) : [];
       const departingSet = new Set(departing);
+
+      // Phase 1: fade out departing edges immediately (same frame as nodes
+      // starting to fly in). Keeping them visible while nodes move to parentPos
+      // causes them to draw as a zero-length horizontal line at the parent.
+      setEdges((prev) => prev.map((e) =>
+        departingSet.has(e.source) || departingSet.has(e.target)
+          ? { ...e, style: { ...e.style, opacity: 0, transition: `opacity ${ANIM_MS}ms ease` } }
+          : e,
+      ));
 
       setNodes((prev) => {
         const parentNode = prev.find((n) => n.id === id);
         const parentPos  = parentNode?.position ?? { x: 0, y: 0 };
-
         return prev.map((n) => {
           if (!departingSet.has(n.id)) return n;
           return {
             ...n,
             position: parentPos,
-            data: {
-              ...n.data,
-              // scale(0) collapses the node to a point at the parent's location.
-              animStyle: { opacity: 0, transform: "scale(0)" },
-            },
+            data: { ...n.data, animStyle: { opacity: 0, transform: "scale(0)" } },
           };
         });
       });
 
       setTimeout(() => {
-        setCollapsedIds((prev) => {
-          const next = new Set(prev);
-          next.add(id);
-          return next;
+        // Phase 2: nodes have finished flying in. Compute the post-collapse
+        // layout, remove departed nodes+edges, then lerp surviving nodes to
+        // their new positions via rAF so edges redraw every frame.
+        const nextCollapsed = new Set(collapsedIds);
+        nextCollapsed.add(id);
+        const { nodes: nextNodes, edges: nextEdges } = buildGraph(
+          tree,
+          nextCollapsed,
+          (nid) => handleToggleRef.current(nid),
+        );
+        const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
+
+        // Remove departed nodes and all departing edges in one batch.
+        // Surviving edges are already opacity:0 for departing ones so there
+        // is no flash — nextEdges replaces them at the end of the lerp.
+        let startNodes: Node[] = [];
+        setNodes((prev) => {
+          startNodes = prev.filter((n) => !departingSet.has(n.id));
+          return startNodes;
         });
-        animating.current = false;
+        setEdges((prev) => prev.filter(
+          (e) => !departingSet.has(e.source) && !departingSet.has(e.target),
+        ));
+
+        const startTime = performance.now();
+        function tick() {
+          const elapsed = performance.now() - startTime;
+          const raw     = Math.min(elapsed / ANIM_MS, 1);
+          // Ease in-out cubic so the motion feels natural.
+          const t = raw < 0.5 ? 4 * raw ** 3 : 1 - (-2 * raw + 2) ** 3 / 2;
+
+          setNodes((prev) =>
+            prev.map((n) => {
+              const from = startNodes.find((s) => s.id === n.id)?.position;
+              const to   = nextPosById.get(n.id);
+              if (!from || !to) return n;
+              return {
+                ...n,
+                position: {
+                  x: from.x + (to.x - from.x) * t,
+                  y: from.y + (to.y - from.y) * t,
+                },
+              };
+            }),
+          );
+
+          if (raw < 1) {
+            requestAnimationFrame(tick);
+          } else {
+            // Lerp done: snap to exact positions, swap in final edges, finish.
+            setNodes((prev) =>
+              prev.map((n) => {
+                const to = nextPosById.get(n.id);
+                return to ? { ...n, position: to } : n;
+              }),
+            );
+            setEdges(nextEdges);
+            skipNextSync.current = true;
+            setCollapsedIds(nextCollapsed);
+            animating.current = false;
+          }
+        }
+        requestAnimationFrame(tick);
       }, ANIM_MS);
 
     } else {

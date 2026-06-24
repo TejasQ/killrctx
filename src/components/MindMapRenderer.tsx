@@ -413,7 +413,7 @@ function MindMapGraph({
   onFullscreenToggle: () => void;
   fullscreen: boolean;
 }) {
-  const { setNodes, setEdges } = useReactFlow();
+  const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   // animating: true while a collapse-out animation is in flight. Blocks
   // re-entrant toggles so two animations don't stomp each other.
@@ -494,6 +494,18 @@ function MindMapGraph({
         );
         const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
 
+        // Pan to the parent's final position now that we know it. Duration matches
+        // the lerp so the viewport arrives as nodes finish rearranging.
+        const parentFinal = nextPosById.get(id);
+        const parentMeta  = nextNodes.find((n) => n.id === id);
+        if (parentFinal && parentMeta) {
+          setCenter(
+            parentFinal.x + (parentMeta.width  ?? 0) / 2,
+            parentFinal.y + (parentMeta.height ?? 0) / 2,
+            { duration: ANIM_MS },
+          );
+        }
+
         // Remove departed nodes and all departing edges in one batch.
         // Surviving edges are already opacity:0 for departing ones so there
         // is no flash — nextEdges replaces them at the end of the lerp.
@@ -553,6 +565,9 @@ function MindMapGraph({
       //          The browser paints this frame — nodes exist but are invisible.
       // Frame B (next rAF): set nodes to their real positions with no animStyle.
       //          The CSS transition on MindMapNode plays the fly-out.
+      // After ANIM_MS: fitView on the parent + new nodes so the whole expanded
+      //          subtree is visible once the fly-out finishes.
+
       const nextCollapsed = new Set(collapsedIds);
       nextCollapsed.delete(id);
 
@@ -562,11 +577,17 @@ function MindMapGraph({
         (nid) => handleToggleRef.current(nid),
       );
 
+      // Collect IDs of nodes that are new (didn't exist before this expand).
+      // We'll fitView on just the parent + these after the fly-out completes.
+      const newNodeIds = new Set(nextNodes.map((n) => n.id));
+
       // Frame A — place new nodes at parent origin, hidden.
       setNodes((prev) => {
         const parentNode  = prev.find((n) => n.id === id);
         const parentPos   = parentNode?.position ?? { x: 0, y: 0 };
         const existingIds = new Set(prev.map((n) => n.id));
+        // Track which IDs are genuinely new so we can fitView them after fly-out.
+        prev.forEach((n) => newNodeIds.delete(n.id));
 
         return nextNodes.map((n) => {
           if (existingIds.has(n.id)) return n;
@@ -580,9 +601,22 @@ function MindMapGraph({
       setEdges(nextEdges);
 
       // Frame B — move to real positions; removing animStyle lets the transition play.
+      // skipNextSync prevents the useEffect from re-snapping positions after
+      // setCollapsedIds triggers a baseNodes recompute.
       requestAnimationFrame(() => {
         setNodes(() => nextNodes);
+        skipNextSync.current = true;
         setCollapsedIds(nextCollapsed);
+
+        // After the CSS fly-out finishes, fit the viewport to the parent node
+        // plus all newly revealed children so the full expanded subtree is visible.
+        setTimeout(() => {
+          fitView({
+            nodes:    [{ id }, ...Array.from(newNodeIds).map((nid) => ({ id: nid }))],
+            duration: ANIM_MS,
+            padding:  0.25,
+          });
+        }, ANIM_MS);
       });
     }
   }, [collapsedIds, tree, setNodes, setEdges]);

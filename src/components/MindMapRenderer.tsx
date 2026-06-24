@@ -9,15 +9,20 @@
 // horizontal left-to-right graph, and hands the result to ReactFlow to render.
 //
 // Visual design principles applied here:
-//   - Solid dark fills per branch (not transparent) — matches the reference
-//     NotebookLM style where nodes are visually distinct blocks.
+//   - Solid dark fills per branch — matches the NotebookLM reference style.
 //   - Each top-level branch gets one of BRANCH_COLORS. Deeper nodes use the
 //     same hue but slightly darker fills.
-//   - Nodes with children show a collapse indicator (< when expanded, > when
-//     collapsed). Clicking them toggles visibility of all descendants.
+//   - Nodes with children show a collapse chevron rendered as a SEPARATE
+//     ReactFlow node floating just outside the right edge of the box. This
+//     keeps the chevron click target completely distinct from the node body
+//     click target (which triggers the node inquiry feature).
+//   - Clicking a node body fires onNodeClick(label, linkedConvIds) so the
+//     parent can open or create a linked conversation in the chat panel.
+//   - Linked nodes (those with prior research conversations) show a small
+//     blue count badge so users can see at a glance what they've explored.
 //   - Expanding: child nodes fly out from their parent's position.
 //   - Collapsing: child nodes fly back into their parent's position, then vanish.
-//   - Source/citation nodes (lines containing "(Source:") are muted.
+//   - Source/citation nodes are muted and not clickable for inquiry.
 //   - Fullscreen: controlled by the parent NoteCard, not by this component.
 //
 // Layout constants live at the top — change them to adjust the feel of the
@@ -39,6 +44,7 @@ import ReactFlow, {
   type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
+import type { MindMapLink } from "@/lib/db";
 
 // ── Animation constant ────────────────────────────────────────────────────────
 // How long the fly-in / fly-out transition takes, in ms. Must match the CSS
@@ -73,13 +79,45 @@ function MindMapNode({ data }: NodeProps) {
   );
 }
 
+// ── ChevronNode ───────────────────────────────────────────────────────────────
+// The collapse/expand toggle rendered as its own standalone ReactFlow node,
+// positioned just outside the right edge of its parent node box.
+//
+// Why a separate node and not a span inside MindMapNode?
+//   If the chevron lives inside the node, clicking it also fires the node's
+//   onNodeClick (inquiry). Separating it into its own node gives it a completely
+//   independent hit target so the two actions never collide.
+//
+// The chevron has no ReactFlow handles — it is purely decorative/interactive
+// and does not participate in the edge graph.
+function ChevronNode({ data }: NodeProps) {
+  const style: React.CSSProperties = {
+    width:          20,
+    height:         20,
+    borderRadius:   4,
+    background:     "rgba(255,255,255,0.08)",
+    border:         "1px solid rgba(255,255,255,0.12)",
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "center",
+    fontSize:       11,
+    color:          "rgba(255,255,255,0.6)",
+    cursor:         "pointer",
+    transition:     `opacity ${ANIM_MS}ms ease, transform ${ANIM_MS}ms ease`,
+    userSelect:     "none",
+    ...data.animStyle,
+  };
+  return <div style={style}>{data.label}</div>;
+}
+
 // Must be defined outside the render function so ReactFlow doesn't recreate
 // the node type on every render (which causes nodes to remount and flicker).
-const NODE_TYPES = { mindmap: MindMapNode };
+const NODE_TYPES = { mindmap: MindMapNode, chevron: ChevronNode };
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-const NODE_X_STEP = 300; // horizontal gap between depth levels
-const NODE_Y_STEP = 68;  // vertical gap between sibling nodes
+const NODE_X_STEP     = 300; // horizontal gap between depth levels
+const NODE_Y_STEP     = 68;  // vertical gap between sibling nodes
+const CHEVRON_OFFSET  = 8;   // px gap between node right edge and chevron
 
 // Per-depth node dimensions. Index = depth level; last entry applies to all
 // deeper levels.
@@ -183,13 +221,9 @@ function parseMindMap(content: string): TreeNode | null {
 }
 
 // ── nodeStyle ─────────────────────────────────────────────────────────────────
-// Solid fills per branch — the key visual change from the previous version.
-// The reference shows clearly readable blocks, not barely-tinted glass cards.
-function nodeStyle(
-  tn: TreeNode,
-  depth: number,
-  collapsed: boolean,
-): React.CSSProperties {
+// Solid fills per branch. cursor is always "pointer" on non-source nodes —
+// every node is clickable for inquiry regardless of whether it has children.
+function nodeStyle(tn: TreeNode, depth: number): React.CSSProperties {
   const ds   = DEPTH_STYLES[Math.min(depth, DEPTH_STYLES.length - 1)];
   const dims = tn.isSource ? SOURCE_STYLE : ds;
   const col  = BRANCH_COLORS[tn.branchIndex];
@@ -228,12 +262,11 @@ function nodeStyle(
       justifyContent: "center",
       padding:        "0 12px",
       boxShadow:      "0 0 18px rgba(124,92,255,0.30)",
-      cursor:         tn.children.length > 0 ? "pointer" : "default",
+      cursor:         "pointer",
     };
   }
 
   // Branch and leaf nodes: solid dark fill, full-opacity border.
-  // Child nodes use a slightly darker variant of the branch fill.
   const fill = depth === 1 ? col.fill : col.childFill;
   return {
     width:          dims.width,
@@ -246,10 +279,9 @@ function nodeStyle(
     color:          col.text,
     display:        "flex",
     alignItems:     "center",
-    justifyContent: "space-between",
+    justifyContent: "center",
     padding:        "0 10px",
-    gap:            "6px",
-    cursor:         tn.children.length > 0 ? "pointer" : "default",
+    cursor:         "pointer",
     // Subtle glow on branch-level nodes that have children.
     boxShadow:      depth === 1 && tn.children.length > 0
       ? `0 0 8px ${col.border}40`
@@ -257,47 +289,60 @@ function nodeStyle(
   };
 }
 
-// ── collapseIndicator ─────────────────────────────────────────────────────────
-// The < / > badge shown on nodes that have children, matching the reference UI.
-// We render it as a separate tiny span inside the node label string.
-// ReactFlow's `data.label` accepts a React element, so we pass JSX.
-function nodeLabel(tn: TreeNode, collapsed: boolean): React.ReactNode {
-  const hasChildren = tn.children.length > 0;
-  if (!hasChildren || tn.isSource) return tn.label;
-
-  const indicator = collapsed ? "›" : "‹";
-  const indicatorStyle: React.CSSProperties = {
-    display:        "inline-flex",
-    alignItems:     "center",
-    justifyContent: "center",
-    width:          18,
-    height:         18,
-    borderRadius:   4,
-    background:     "rgba(255,255,255,0.08)",
-    fontSize:       11,
-    lineHeight:     1,
-    flexShrink:     0,
-    color:          "inherit",
-    opacity:        0.75,
-  };
+// ── nodeLabel ─────────────────────────────────────────────────────────────────
+// Returns the node's display content. For linked nodes (those with prior
+// research conversations) a small blue count badge is added in the top-right
+// corner so the user can see at a glance which nodes have been explored.
+//
+// The badge uses `pointerEvents: none` so it never intercepts clicks — the
+// node body click fires normally through it.
+function nodeLabel(tn: TreeNode, linkedCount: number): React.ReactNode {
+  if (linkedCount === 0) return tn.label;
 
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+    <span style={{ position: "relative", display: "inline-flex", alignItems: "center", width: "100%", overflow: "hidden" }}>
       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {tn.label}
       </span>
-      <span style={indicatorStyle}>{indicator}</span>
+      {/* Badge: blue circle showing number of linked conversations */}
+      <span style={{
+        position:       "absolute",
+        top:            -8,
+        right:          -8,
+        minWidth:       16,
+        height:         16,
+        borderRadius:   "50%",
+        background:     "#3b82f6",
+        color:          "#fff",
+        fontSize:       9,
+        fontWeight:     700,
+        display:        "flex",
+        alignItems:     "center",
+        justifyContent: "center",
+        padding:        "0 3px",
+        pointerEvents:  "none",
+        lineHeight:     1,
+        boxShadow:      "0 0 6px rgba(59,130,246,0.6)",
+      }}>
+        {linkedCount}
+      </span>
     </span>
   );
 }
 
 // ── buildGraph ────────────────────────────────────────────────────────────────
 // Walks the tree and produces ReactFlow nodes[] + edges[], skipping any subtree
-// whose root is in `collapsedIds`. Layout is the same horizontal BFS as before.
+// whose root is in `collapsedIds`. Layout is a horizontal BFS.
+//
+// Chevron nodes are emitted as separate ReactFlow nodes for every parent node
+// (nodes with children) — positioned OUTSIDE the right edge of their parent box.
+// This keeps collapse/expand clicks separate from node-body inquiry clicks.
 function buildGraph(
-  root: TreeNode,
-  collapsedIds: Set<string>,
-  onToggle: (id: string) => void,
+  root:          TreeNode,
+  collapsedIds:  Set<string>,
+  onToggle:      (id: string) => void,
+  onAsk:         (label: string) => void,
+  linksByLabel:  Map<string, string[]>,
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -310,7 +355,6 @@ function buildGraph(
   while (queue.length) {
     const item = queue.shift()!;
     all.push(item);
-    // Only enqueue children if this node is NOT collapsed.
     if (!collapsedIds.has(item.tn.id)) {
       for (const child of item.tn.children) {
         queue.push({ tn: child, depth: item.depth + 1, parentId: item.tn.id });
@@ -322,7 +366,6 @@ function buildGraph(
   let leafY = 0;
   const yMap: Record<string, number> = {};
   function assignY(tn: TreeNode): number {
-    // If collapsed, treat as a leaf even if it has children.
     if (tn.children.length === 0 || collapsedIds.has(tn.id)) {
       yMap[tn.id] = leafY * NODE_Y_STEP;
       leafY++;
@@ -335,23 +378,48 @@ function buildGraph(
   assignY(root);
 
   for (const { tn, depth, parentId } of all) {
-    const collapsed = collapsedIds.has(tn.id);
-    const label     = nodeLabel(tn, collapsed);
-    const ns        = nodeStyle(tn, depth, collapsed);
-    const hasKids   = tn.children.length > 0;
-    const data = hasKids
-      ? { label, style: ns, onClick: () => onToggle(tn.id) }
-      : { label, style: ns };
+    const ns          = nodeStyle(tn, depth);
+    const dims        = tn.isSource ? SOURCE_STYLE : DEPTH_STYLES[Math.min(depth, DEPTH_STYLES.length - 1)];
+    const hasKids     = tn.children.length > 0;
+    const linkedCount = tn.isSource ? 0 : (linksByLabel.get(tn.label)?.length ?? 0);
+    const label       = nodeLabel(tn, linkedCount);
+
+    // Node body — clicking fires inquiry (onAsk), not collapse.
     nodes.push({
-      id:         tn.id,
-      data,
-      position:   { x: depth * NODE_X_STEP, y: yMap[tn.id] },
-      type:       "mindmap",
-      // elementsSelectable=false on ReactFlow suppresses onNodeClick globally.
-      // Opt collapsible nodes back in individually so clicks register without
-      // showing a selection highlight on any node.
-      selectable: hasKids,
+      id:       tn.id,
+      type:     "mindmap",
+      position: { x: depth * NODE_X_STEP, y: yMap[tn.id] },
+      // All non-source nodes are selectable so onNodeClick fires for leaves too.
+      selectable: !tn.isSource,
+      data: {
+        label,
+        style: ns,
+        // onClick is called by MindMapGraph's handleNodeClick.
+        ...(!tn.isSource && { onClick: () => onAsk(tn.label) }),
+      },
     });
+
+    // Chevron — emitted as a sibling node outside the right edge of its parent.
+    // Only for nodes that have children.
+    if (hasKids) {
+      const collapsed   = collapsedIds.has(tn.id);
+      const chevronId   = `chevron-${tn.id}`;
+      const chevronSize = 20;
+      nodes.push({
+        id:         chevronId,
+        type:       "chevron",
+        selectable: true,
+        // Position: centred vertically on the parent, just past its right edge.
+        position: {
+          x: depth * NODE_X_STEP + dims.width + CHEVRON_OFFSET,
+          y: yMap[tn.id] + (dims.height - chevronSize) / 2,
+        },
+        data: {
+          label:   collapsed ? "›" : "‹",
+          onClick: () => onToggle(tn.id),
+        },
+      });
+    }
 
     if (parentId !== null) {
       const col = BRANCH_COLORS[tn.branchIndex];
@@ -374,10 +442,12 @@ function buildGraph(
 // ── collectDescendantIds ──────────────────────────────────────────────────────
 // Returns all descendant ids of a given node in the tree (not just direct
 // children). Used to know which nodes to animate out on collapse.
+// Also returns the paired chevron IDs since they must animate together.
 function collectDescendantIds(tn: TreeNode): string[] {
   const ids: string[] = [];
   for (const child of tn.children) {
     ids.push(child.id);
+    ids.push(`chevron-${child.id}`);
     ids.push(...collectDescendantIds(child));
   }
   return ids;
@@ -405,9 +475,13 @@ function findNode(root: TreeNode, id: string): TreeNode | null {
 function MindMapGraph({
   tree,
   variant,
+  linksByLabel,
+  onNodeClick,
 }: {
-  tree: TreeNode;
-  variant: "card" | "expanded" | "fullscreen";
+  tree:         TreeNode;
+  variant:      "card" | "expanded" | "fullscreen";
+  linksByLabel: Map<string, string[]>;
+  onNodeClick:  (label: string, linkedConvIds: string[]) => void;
 }) {
   const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
@@ -418,20 +492,23 @@ function MindMapGraph({
   // positions after the animation — we handle the final state ourselves.
   const skipNextSync = useRef(false);
 
-  // Build the stable (non-animated) graph for the current collapse state.
-  // We keep a ref to the last toggle callback so buildGraph doesn't need to
-  // know about the animation — the toggle is intercepted at handleToggle.
+  // Keep toggle and ask refs so buildGraph closures always call the latest.
   const handleToggleRef = useRef<(id: string) => void>(() => {});
+  const handleAskRef    = useRef<(label: string) => void>(() => {});
 
   const { nodes: baseNodes, edges: baseEdges } = useMemo(
-    () => buildGraph(tree, collapsedIds, (id) => handleToggleRef.current(id)),
-    [tree, collapsedIds],
+    () => buildGraph(
+      tree,
+      collapsedIds,
+      (id) => handleToggleRef.current(id),
+      (label) => handleAskRef.current(label),
+      linksByLabel,
+    ),
+    [tree, collapsedIds, linksByLabel],
   );
 
   // Sync ReactFlow internal state on initial mount and whenever baseNodes
-  // changes for reasons other than a collapse animation (e.g. expand finish,
-  // tree content change). Collapse manages its own final state to avoid the
-  // two-step jerk caused by this sync firing mid-animation.
+  // changes for reasons other than a collapse animation.
   useEffect(() => {
     if (skipNextSync.current) {
       skipNextSync.current = false;
@@ -448,20 +525,13 @@ function MindMapGraph({
 
     if (isCollapsing) {
       // ── Collapse animation ────────────────────────────────────────────────
-      // 1. Animate departing nodes flying back into the parent (scale 0, opacity 0).
-      // 2. After ANIM_MS, remove them from ReactFlow directly — no layout
-      //    recalculation fires mid-animation, so surviving nodes don't jump.
-      // 3. Update collapsedIds (skipNextSync prevents the useEffect from
-      //    re-snapping positions — we already have the right state).
       animating.current = true;
 
       const subtreeRoot  = findNode(tree, id);
       const departing    = subtreeRoot ? collectDescendantIds(subtreeRoot) : [];
       const departingSet = new Set(departing);
 
-      // Phase 1: fade+shrink departing nodes and fade their edges simultaneously
-      // so everything disappears at the same rate. Nodes use the CSS transition
-      // on MindMapNode's inner div; edges get an SVG opacity transition inline.
+      // Phase 1: fade+shrink departing nodes and their edges simultaneously.
       setNodes((prev) =>
         prev.map((n) => {
           if (!departingSet.has(n.id)) return n;
@@ -478,20 +548,19 @@ function MindMapGraph({
       ));
 
       setTimeout(() => {
-        // Phase 2: nodes have finished flying in. Compute the post-collapse
-        // layout, remove departed nodes+edges, then lerp surviving nodes to
-        // their new positions via rAF so edges redraw every frame.
+        // Phase 2: compute post-collapse layout, remove departed nodes+edges,
+        // then lerp surviving nodes to their new positions.
         const nextCollapsed = new Set(collapsedIds);
         nextCollapsed.add(id);
         const { nodes: nextNodes, edges: nextEdges } = buildGraph(
           tree,
           nextCollapsed,
           (nid) => handleToggleRef.current(nid),
+          (label) => handleAskRef.current(label),
+          linksByLabel,
         );
         const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
 
-        // Pan to the parent's final position now that we know it. Duration matches
-        // the lerp so the viewport arrives as nodes finish rearranging.
         const parentFinal = nextPosById.get(id);
         const parentMeta  = nextNodes.find((n) => n.id === id);
         if (parentFinal && parentMeta) {
@@ -502,9 +571,6 @@ function MindMapGraph({
           );
         }
 
-        // Remove departed nodes and all departing edges in one batch.
-        // Surviving edges are already opacity:0 for departing ones so there
-        // is no flash — nextEdges replaces them at the end of the lerp.
         let startNodes: Node[] = [];
         setNodes((prev) => {
           startNodes = prev.filter((n) => !departingSet.has(n.id));
@@ -518,7 +584,6 @@ function MindMapGraph({
         function tick() {
           const elapsed = performance.now() - startTime;
           const raw     = Math.min(elapsed / ANIM_MS, 1);
-          // Ease in-out cubic so the motion feels natural.
           const t = raw < 0.5 ? 4 * raw ** 3 : 1 - (-2 * raw + 2) ** 3 / 2;
 
           setNodes((prev) =>
@@ -539,7 +604,6 @@ function MindMapGraph({
           if (raw < 1) {
             requestAnimationFrame(tick);
           } else {
-            // Lerp done: snap to exact positions, swap in final edges, finish.
             setNodes((prev) =>
               prev.map((n) => {
                 const to = nextPosById.get(n.id);
@@ -557,14 +621,6 @@ function MindMapGraph({
 
     } else {
       // ── Expand animation ──────────────────────────────────────────────────
-      // Frame A: inject new nodes at the parent's position, scale(0) opacity(0).
-      //          The browser paints this frame — nodes exist but are invisible.
-      // Frame B (next rAF): move nodes to real positions — CSS transition plays
-      //          the fly-out over ANIM_MS. Viewport stays still so the parent
-      //          remains visible throughout.
-      // After ANIM_MS: fitView on the parent + new nodes so the full expanded
-      //          subtree scrolls into view once the fly-out finishes.
-
       const nextCollapsed = new Set(collapsedIds);
       nextCollapsed.delete(id);
 
@@ -572,12 +628,12 @@ function MindMapGraph({
         tree,
         nextCollapsed,
         (nid) => handleToggleRef.current(nid),
+        (label) => handleAskRef.current(label),
+        linksByLabel,
       );
 
-      // Collect new node ids before Frame A so we know what to fitView after.
       let newNodeIds: string[] = [];
 
-      // Frame A — place new nodes at parent origin, hidden.
       setNodes((prev) => {
         const parentNode  = prev.find((n) => n.id === id);
         const parentPos   = parentNode?.position ?? { x: 0, y: 0 };
@@ -595,16 +651,11 @@ function MindMapGraph({
       });
       setEdges(nextEdges);
 
-      // Frame B — move to real positions; CSS transition plays the fly-out.
-      // skipNextSync prevents the useEffect from re-snapping positions when
-      // setCollapsedIds triggers a baseNodes recompute.
       requestAnimationFrame(() => {
         setNodes(() => nextNodes);
         skipNextSync.current = true;
         setCollapsedIds(nextCollapsed);
 
-        // After the fly-out completes, pan+zoom to frame the parent and all
-        // newly visible children together.
         setTimeout(() => {
           fitView({
             nodes:    [{ id }, ...newNodeIds.map((nid) => ({ id: nid }))],
@@ -614,10 +665,14 @@ function MindMapGraph({
         }, ANIM_MS);
       });
     }
-  }, [collapsedIds, tree, setNodes, setEdges]);
+  }, [collapsedIds, tree, linksByLabel, setNodes, setEdges]);
 
-  // Keep the ref in sync so buildGraph always calls the latest handleToggle.
+  // Keep refs in sync so buildGraph closures always call the latest handlers.
   handleToggleRef.current = handleToggle;
+  handleAskRef.current = (label: string) => {
+    const linkedConvIds = linksByLabel.get(label) ?? [];
+    onNodeClick(label, linkedConvIds);
+  };
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
@@ -626,8 +681,6 @@ function MindMapGraph({
     [],
   );
 
-  // "fullscreen" fills the flex parent; "expanded" uses the fixed 500 px slot;
-  // "card" uses the smaller 300 px slot in the NoteCard preview.
   const containerClass =
     variant === "fullscreen"
       ? "w-full h-full bg-ink overflow-hidden"
@@ -658,16 +711,38 @@ function MindMapGraph({
 }
 
 // ── MindMapRenderer ───────────────────────────────────────────────────────────
-// Outer shell: parses content, wraps in ReactFlowProvider (required for
-// useReactFlow inside MindMapGraph). Fullscreen is owned by the parent.
+// Outer shell: parses content, builds the linksByLabel lookup, wraps in
+// ReactFlowProvider (required for useReactFlow inside MindMapGraph).
+// Fullscreen is owned by the parent NoteCard, not this component.
 export default function MindMapRenderer({
   content,
   variant,
+  noteId,
+  mindMapLinks,
+  onNodeClick,
 }: {
-  content: string;
-  variant: "card" | "expanded" | "fullscreen";
+  content:      string;
+  variant:      "card" | "expanded" | "fullscreen";
+  noteId:       string;
+  mindMapLinks?: MindMapLink[];
+  onNodeClick?: (nodeLabel: string, linkedConvIds: string[]) => void;
 }) {
   const tree = useMemo(() => parseMindMap(content), [content]);
+
+  // Build a label → conversationId[] map scoped to this note.
+  // Passed into MindMapGraph so buildGraph can add badges and wire clicks.
+  const linksByLabel = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const link of mindMapLinks ?? []) {
+      if (link.note_id !== noteId) continue;
+      if (!map.has(link.node_label)) map.set(link.node_label, []);
+      map.get(link.node_label)!.push(link.conversation_id);
+    }
+    return map;
+  }, [mindMapLinks, noteId]);
+
+  // No-op click handler when the parent hasn't wired one up (e.g. card preview).
+  const handleNodeClick = onNodeClick ?? (() => {});
 
   if (!tree) {
     return <p className="text-xs text-muted">No mind map content.</p>;
@@ -675,7 +750,12 @@ export default function MindMapRenderer({
 
   return (
     <ReactFlowProvider>
-      <MindMapGraph tree={tree} variant={variant} />
+      <MindMapGraph
+        tree={tree}
+        variant={variant}
+        linksByLabel={linksByLabel}
+        onNodeClick={handleNodeClick}
+      />
     </ReactFlowProvider>
   );
 }

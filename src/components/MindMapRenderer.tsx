@@ -86,6 +86,7 @@ const LEAKAGE_FILTERS: RegExp[] = [
   /^\s*\{/,             // JSON object
   /^\s*"/,              // JSON string fragment
   /[.!?]\s+[A-Z]/,      // mid-sentence capital after punctuation (prose)
+  /\{[^}]+\}/,          // any {placeholder} or tool-call leak e.g. {search_query}
 ];
 // Labels longer than this are almost certainly prose, not concept labels.
 const MAX_LABEL_LENGTH = 60;

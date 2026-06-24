@@ -75,11 +75,26 @@ type TreeNode = {
   children: TreeNode[];
 };
 
+// ── LEAKAGE_FILTERS ───────────────────────────────────────────────────────────
+// Patterns that indicate LLM leakage: source citations, JSON fragments, or
+// prose sentences that don't belong in a concept label. Any label matching one
+// of these is silently dropped from the tree rather than rendered as a node.
+// This is a defence-in-depth measure — the prompt already forbids these, but
+// models sometimes leak them anyway.
+const LEAKAGE_FILTERS: RegExp[] = [
+  /\(Source:/i,          // citation parenthetical
+  /^\s*\{/,             // JSON object
+  /^\s*"/,              // JSON string fragment
+  /[.!?]\s+[A-Z]/,      // mid-sentence capital after punctuation (prose)
+];
+// Labels longer than this are almost certainly prose, not concept labels.
+const MAX_LABEL_LENGTH = 60;
+
 // ── parseMindMap ──────────────────────────────────────────────────────────────
 // Converts a nested markdown list string into a TreeNode tree.
 // Only lines starting with "- " (after stripping leading spaces) are processed.
 // Depth is Math.floor(leadingSpaces / 2), matching the AI prompt convention.
-// Lines whose label contains "(Source:" are flagged as source nodes.
+// Labels matching LEAKAGE_FILTERS or exceeding MAX_LABEL_LENGTH are dropped.
 function parseMindMap(content: string): TreeNode | null {
   const lines = content.split("\n");
   const stack: TreeNode[] = [];
@@ -92,7 +107,13 @@ function parseMindMap(content: string): TreeNode | null {
 
     const depth    = Math.floor(match[1].length / 2);
     const label    = match[2].trim();
-    const isSource = label.includes("(Source:");
+
+    // Drop any label that looks like LLM leakage.
+    if (label.length > MAX_LABEL_LENGTH) continue;
+    if (LEAKAGE_FILTERS.some((re) => re.test(label))) continue;
+
+    // isSource is kept for any residual parenthetical that slips through.
+    const isSource = label.startsWith("(") && label.endsWith(")");
 
     // Stable ID: join ancestor ids + position among siblings.
     const id =

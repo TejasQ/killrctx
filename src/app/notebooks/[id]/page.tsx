@@ -32,11 +32,16 @@
 "use client";
 
 import React, { use, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import Spinner from "@/components/Spinner";
+// ReactFlow uses browser-only APIs (ResizeObserver, window). Dynamic import with
+// ssr:false prevents the component from being pre-rendered on the server, which
+// would throw and silently swallow the content panel.
+const MindMapRenderer = dynamic(() => import("@/components/MindMapRenderer"), { ssr: false });
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
 import ModelPickerPopover from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
@@ -1478,6 +1483,8 @@ function StudioPanel({
           ) : expandedNote.content ? (
             expandedNote.type === "outline" ? (
               <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
+            ) : expandedNote.type === "mindmap" ? (
+              <MindMapRenderer content={expandedNote.content} variant="expanded" />
             ) : (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                 {fixMarkdown(expandedNote.content)}
@@ -1692,6 +1699,8 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
         <div className="border-t border-edge px-3 py-2 text-sm">
           {note.type === "outline" ? (
             <OutlineRenderer content={note.content} topic={note.topic} />
+          ) : note.type === "mindmap" ? (
+            <MindMapRenderer content={note.content} variant="card" />
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
               {fixMarkdown(note.content)}

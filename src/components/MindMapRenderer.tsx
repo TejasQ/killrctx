@@ -27,11 +27,33 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
+  Handle,
   Panel,
+  Position,
   type Node,
   type Edge,
+  type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
+
+// ── MindMapNode ───────────────────────────────────────────────────────────────
+// Custom node type with handles ONLY on the left and right sides.
+// ReactFlow's default node type has handles on all four sides and auto-picks
+// the closest one — causing top/bottom connections on a horizontal layout.
+// This node eliminates top/bottom handles entirely so lines always go L→R.
+function MindMapNode({ data }: NodeProps) {
+  return (
+    <div style={{ ...data.style, position: "relative" }}>
+      <Handle type="target" position={Position.Left}  style={{ visibility: "hidden" }} />
+      {data.label}
+      <Handle type="source" position={Position.Right} style={{ visibility: "hidden" }} />
+    </div>
+  );
+}
+
+// Must be defined outside the render function so ReactFlow doesn't recreate
+// the node type on every render (which causes nodes to remount and flicker).
+const NODE_TYPES = { mindmap: MindMapNode };
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const NODE_X_STEP = 300; // horizontal gap between depth levels
@@ -294,17 +316,22 @@ function buildGraph(
   for (const { tn, depth, parentId } of all) {
     const collapsed = collapsedIds.has(tn.id);
     const label     = nodeLabel(tn, collapsed);
-    // Nodes with children get an onClick stored in data so handleNodeClick can
-    // fire the collapse toggle. Leaf nodes just carry the label.
-    const data = tn.children.length > 0
-      ? { label, onClick: () => onToggle(tn.id) }
-      : { label };
+    const ns        = nodeStyle(tn, depth, collapsed);
+    const hasKids   = tn.children.length > 0;
+    // Style lives in data so MindMapNode applies it to its own div (not the
+    // ReactFlow outer wrapper). onClick is kept in data for handleNodeClick.
+    const data = hasKids
+      ? { label, style: ns, onClick: () => onToggle(tn.id) }
+      : { label, style: ns };
     nodes.push({
-      id:       tn.id,
+      id:         tn.id,
       data,
-      position: { x: depth * NODE_X_STEP, y: yMap[tn.id] },
-      style:    nodeStyle(tn, depth, collapsed),
-      type:     "default",
+      position:   { x: depth * NODE_X_STEP, y: yMap[tn.id] },
+      type:       "mindmap",
+      // elementsSelectable=false on ReactFlow suppresses onNodeClick globally.
+      // Opt collapsible nodes back in individually so clicks register without
+      // showing a selection highlight on any node.
+      selectable: hasKids,
     });
 
     if (parentId !== null) {
@@ -396,6 +423,7 @@ export default function MindMapRenderer({
     <ReactFlow
       nodes={nodes}
       edges={edges}
+      nodeTypes={NODE_TYPES}
       fitView
       fitViewOptions={{ padding: 0.2 }}
       nodesDraggable={false}

@@ -342,7 +342,7 @@ function buildGraph(
   collapsedIds:  Set<string>,
   onToggle:      (id: string) => void,
   onAsk:         (id: string, label: string) => void,
-  linksByLabel:  Map<string, string[]>,
+  linksByKey:    Map<string, string[]>,
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -381,7 +381,11 @@ function buildGraph(
     const ns          = nodeStyle(tn, depth);
     const dims        = tn.isSource ? SOURCE_STYLE : DEPTH_STYLES[Math.min(depth, DEPTH_STYLES.length - 1)];
     const hasKids     = tn.children.length > 0;
-    const linkedCount = tn.isSource ? 0 : (linksByLabel.get(tn.label)?.length ?? 0);
+    // Build the composite key for this node. We need ancestors so we call
+    // findAncestorLabels here — O(depth) per node, negligible for mind maps.
+    const ancestors   = findAncestorLabels(root, tn.id) ?? [];
+    const key         = nodeKey(tn.label, ancestors);
+    const linkedCount = tn.isSource ? 0 : (linksByKey.get(key)?.length ?? 0);
     const label       = nodeLabel(tn, linkedCount);
 
     // Node body — clicking fires inquiry (onAsk), not collapse.
@@ -464,6 +468,14 @@ function findNode(root: TreeNode, id: string): TreeNode | null {
   return null;
 }
 
+// ── nodeKey ───────────────────────────────────────────────────────────────────
+// Composite identity for a node: its label plus the ancestor path joined by "|".
+// Two nodes with the same label under different parents produce different keys,
+// so "Attack Roll: d20 (under Reckless Attack)" ≠ "Attack Roll: d20 (under Rage Strike)".
+function nodeKey(label: string, ancestorLabels: string[]): string {
+  return `${label}|${ancestorLabels.join(" > ")}`;
+}
+
 // ── findAncestorLabels ────────────────────────────────────────────────────────
 // Returns the labels of every ancestor of `targetId`, from root down to (but
 // NOT including) the target itself.  Used to build the breadcrumb context that
@@ -490,12 +502,12 @@ function findAncestorLabels(root: TreeNode, targetId: string, path: string[] = [
 function MindMapGraph({
   tree,
   variant,
-  linksByLabel,
+  linksByKey,
   onNodeClick,
 }: {
   tree:         TreeNode;
   variant:      "card" | "expanded" | "fullscreen";
-  linksByLabel: Map<string, string[]>;
+  linksByKey:   Map<string, string[]>;
   onNodeClick:  (label: string, linkedConvIds: string[], ancestorLabels: string[]) => void;
 }) {
   const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
@@ -517,9 +529,9 @@ function MindMapGraph({
       collapsedIds,
       (id) => handleToggleRef.current(id),
       (id, label) => handleAskRef.current(id, label),
-      linksByLabel,
+      linksByKey,
     ),
-    [tree, collapsedIds, linksByLabel],
+    [tree, collapsedIds, linksByKey],
   );
 
   // Sync ReactFlow internal state on initial mount and whenever baseNodes
@@ -572,7 +584,7 @@ function MindMapGraph({
           nextCollapsed,
           (nid) => handleToggleRef.current(nid),
           (id, label) => handleAskRef.current(id, label),
-          linksByLabel,
+          linksByKey,
         );
         const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
 
@@ -644,7 +656,7 @@ function MindMapGraph({
         nextCollapsed,
         (nid) => handleToggleRef.current(nid),
         (id, label) => handleAskRef.current(id, label),
-        linksByLabel,
+        linksByKey,
       );
 
       let newNodeIds: string[] = [];
@@ -680,15 +692,17 @@ function MindMapGraph({
         }, ANIM_MS);
       });
     }
-  }, [collapsedIds, tree, linksByLabel, setNodes, setEdges]);
+  }, [collapsedIds, tree, linksByKey, setNodes, setEdges]);
 
   // Keep refs in sync so buildGraph closures always call the latest handlers.
   handleToggleRef.current = handleToggle;
   handleAskRef.current = (id: string, label: string) => {
-    const linkedConvIds   = linksByLabel.get(label) ?? [];
-    // Walk the tree to build the breadcrumb path so frameQuestion can include
-    // e.g. "under: Berserker Korg > Abilities > Reckless Attack".
     const ancestorLabels  = findAncestorLabels(tree, id) ?? [];
+    // Look up by composite key so two nodes with the same label under different
+    // parents don't collide — e.g. "Attack Roll: d20" under Reckless Attack vs.
+    // the same label under Rage Strike are distinct entries in linksByKey.
+    const key             = nodeKey(label, ancestorLabels);
+    const linkedConvIds   = linksByKey.get(key) ?? [];
     onNodeClick(label, linkedConvIds, ancestorLabels);
   };
 
@@ -729,7 +743,7 @@ function MindMapGraph({
 }
 
 // ── MindMapRenderer ───────────────────────────────────────────────────────────
-// Outer shell: parses content, builds the linksByLabel lookup, wraps in
+// Outer shell: parses content, builds the linksByKey lookup, wraps in
 // ReactFlowProvider (required for useReactFlow inside MindMapGraph).
 // Fullscreen is owned by the parent NoteCard, not this component.
 export default function MindMapRenderer({
@@ -747,14 +761,19 @@ export default function MindMapRenderer({
 }) {
   const tree = useMemo(() => parseMindMap(content), [content]);
 
-  // Build a label → conversationId[] map scoped to this note.
-  // Passed into MindMapGraph so buildGraph can add badges and wire clicks.
-  const linksByLabel = useMemo(() => {
+  // Build a composite-key → conversationId[] map scoped to this note.
+  // Key = nodeKey(node_label, node_path) so two nodes sharing a label under
+  // different parents are distinct entries and don't cross-contaminate badges.
+  const linksByKey = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const link of mindMapLinks ?? []) {
       if (link.note_id !== noteId) continue;
-      if (!map.has(link.node_label)) map.set(link.node_label, []);
-      map.get(link.node_label)!.push(link.conversation_id);
+      // node_path is stored as the ancestor string "A > B > C", split back to
+      // an array so nodeKey() can rejoin it consistently.
+      const ancestors = link.node_path ? link.node_path.split(" > ") : [];
+      const key = nodeKey(link.node_label, ancestors);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(link.conversation_id);
     }
     return map;
   }, [mindMapLinks, noteId]);
@@ -771,7 +790,7 @@ export default function MindMapRenderer({
       <MindMapGraph
         tree={tree}
         variant={variant}
-        linksByLabel={linksByLabel}
+        linksByKey={linksByKey}
         onNodeClick={handleNodeClick}
       />
     </ReactFlowProvider>

@@ -196,11 +196,13 @@ export default function NotebookPage({
     // activeConvId is committed to state.
     setPendingAsk(frameQuestion(nodeLabel, ancestorLabels, noteTopic));
 
-    // Persist the link record.
+    // Persist the link record. nodePath is the ancestor breadcrumb stored in
+    // the DB so lookups can distinguish same-label nodes under different parents.
+    const nodePath = ancestorLabels.join(" > ");
     const linkRes = await fetch(`/api/notebooks/${id}/mind-map-links`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ noteId, nodeLabel, conversationId: conversation.id }),
+      body: JSON.stringify({ noteId, nodeLabel, nodePath, conversationId: conversation.id }),
     });
     if (linkRes.ok) {
       const { link } = await linkRes.json() as { link: MindMapLink };

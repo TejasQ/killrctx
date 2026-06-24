@@ -21,7 +21,9 @@ export const runtime = "nodejs";
 /**
  * POST /api/notebooks/[id]/mind-map-links
  *
- * Body: { noteId: string; nodeLabel: string; conversationId: string }
+ * Body: { noteId: string; nodeLabel: string; nodePath: string; conversationId: string }
+ * nodePath is the ancestor breadcrumb (e.g. "Berserker Korg > Abilities > Reckless Attack").
+ * Empty string for root-level nodes.
  * Response: { link: MindMapLink }
  */
 export async function POST(
@@ -29,9 +31,10 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { noteId, nodeLabel, conversationId } = (await req.json()) as {
+  const { noteId, nodeLabel, nodePath, conversationId } = (await req.json()) as {
     noteId?: string;
     nodeLabel?: string;
+    nodePath?: string;
     conversationId?: string;
   };
 
@@ -57,8 +60,8 @@ export async function POST(
 
   const linkId = uuid();
   db.prepare(
-    "INSERT INTO mind_map_links (id, note_id, node_label, conversation_id, created_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(linkId, noteId, nodeLabel, conversationId, Date.now());
+    "INSERT INTO mind_map_links (id, note_id, node_label, node_path, conversation_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(linkId, noteId, nodeLabel, nodePath ?? "", conversationId, Date.now());
 
   const link = db
     .prepare("SELECT * FROM mind_map_links WHERE id = ?")

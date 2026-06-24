@@ -14,6 +14,8 @@
 //     same hue but slightly darker fills.
 //   - Nodes with children show a collapse indicator (< when expanded, > when
 //     collapsed). Clicking them toggles visibility of all descendants.
+//   - Expanding: child nodes fly out from their parent's position.
+//   - Collapsing: child nodes fly back into their parent's position, then vanish.
 //   - Source/citation nodes (lines containing "(Source:") are muted.
 //   - Fullscreen: a toggle button inside the graph mounts a fixed overlay.
 //
@@ -23,27 +25,44 @@
 
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   Handle,
   Panel,
   Position,
+  ReactFlowProvider,
+  useReactFlow,
   type Node,
   type Edge,
   type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
 
+// ── Animation constant ────────────────────────────────────────────────────────
+// How long the fly-in / fly-out transition takes, in ms. Must match the CSS
+// transition duration on MindMapNode below.
+const ANIM_MS = 220;
+
 // ── MindMapNode ───────────────────────────────────────────────────────────────
 // Custom node type with handles ONLY on the left and right sides.
 // ReactFlow's default node type has handles on all four sides and auto-picks
 // the closest one — causing top/bottom connections on a horizontal layout.
 // This node eliminates top/bottom handles entirely so lines always go L→R.
+//
+// The transition property here is what drives the expand/collapse animation —
+// ReactFlow updates the node's `transform` (position) and we tween opacity/scale
+// via data.animStyle so the node appears to fly in or out of its parent.
 function MindMapNode({ data }: NodeProps) {
+  const style: React.CSSProperties = {
+    ...data.style,
+    position:   "relative",
+    transition: `opacity ${ANIM_MS}ms ease, transform ${ANIM_MS}ms ease`,
+    ...data.animStyle,
+  };
   return (
-    <div style={{ ...data.style, position: "relative" }}>
+    <div style={style}>
       <Handle type="target" position={Position.Left}  style={{ visibility: "hidden" }} />
       {data.label}
       <Handle type="source" position={Position.Right} style={{ visibility: "hidden" }} />
@@ -271,8 +290,7 @@ function nodeLabel(tn: TreeNode, collapsed: boolean): React.ReactNode {
 
 // ── buildGraph ────────────────────────────────────────────────────────────────
 // Walks the tree and produces ReactFlow nodes[] + edges[], skipping any subtree
-// whose root is in `collapsedIds`. Collapsed nodes still appear; their children
-// do not. Layout is the same horizontal BFS as before.
+// whose root is in `collapsedIds`. Layout is the same horizontal BFS as before.
 function buildGraph(
   root: TreeNode,
   collapsedIds: Set<string>,
@@ -318,8 +336,6 @@ function buildGraph(
     const label     = nodeLabel(tn, collapsed);
     const ns        = nodeStyle(tn, depth, collapsed);
     const hasKids   = tn.children.length > 0;
-    // Style lives in data so MindMapNode applies it to its own div (not the
-    // ReactFlow outer wrapper). onClick is kept in data for handleNodeClick.
     const data = hasKids
       ? { label, style: ns, onClick: () => onToggle(tn.id) }
       : { label, style: ns };
@@ -352,77 +368,173 @@ function buildGraph(
   return { nodes, edges };
 }
 
-// ── MindMapRenderer ───────────────────────────────────────────────────────────
-export default function MindMapRenderer({
-  content,
+// ── collectDescendantIds ──────────────────────────────────────────────────────
+// Returns all descendant ids of a given node in the tree (not just direct
+// children). Used to know which nodes to animate out on collapse.
+function collectDescendantIds(tn: TreeNode): string[] {
+  const ids: string[] = [];
+  for (const child of tn.children) {
+    ids.push(child.id);
+    ids.push(...collectDescendantIds(child));
+  }
+  return ids;
+}
+
+// ── findNode ──────────────────────────────────────────────────────────────────
+function findNode(root: TreeNode, id: string): TreeNode | null {
+  if (root.id === id) return root;
+  for (const child of root.children) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+// ── MindMapGraph ──────────────────────────────────────────────────────────────
+// Inner component — needs to live inside ReactFlowProvider to use useReactFlow.
+// Owns the collapse state and drives the fly-in / fly-out animation.
+//
+// Animation sequence:
+//   Expand: add new nodes at parent's position (scale 0, opacity 0) →
+//           next frame: move to real position (scale 1, opacity 1) → CSS plays.
+//   Collapse: move departing nodes to parent's position (scale 0, opacity 0) →
+//             wait ANIM_MS → apply new collapsed graph (nodes are gone).
+function MindMapGraph({
+  tree,
   variant,
+  onFullscreenToggle,
+  fullscreen,
 }: {
-  content: string;
+  tree: TreeNode;
   variant: "card" | "expanded";
+  onFullscreenToggle: () => void;
+  fullscreen: boolean;
 }) {
-  const [fullscreen, setFullscreen] = useState(false);
-  // Set of node ids that are currently collapsed.
+  const { setNodes, setEdges } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  // animating: true while a collapse-out animation is in flight. Blocks
+  // re-entrant toggles so two animations don't stomp each other.
+  const animating = useRef(false);
 
-  // Exit fullscreen on Escape.
-  useEffect(() => {
-    if (!fullscreen) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setFullscreen(false);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [fullscreen]);
+  // Build the stable (non-animated) graph for the current collapse state.
+  // We keep a ref to the last toggle callback so buildGraph doesn't need to
+  // know about the animation — the toggle is intercepted at handleToggle.
+  const handleToggleRef = useRef<(id: string) => void>(() => {});
 
-  // Parse the tree once; only depends on content.
-  const tree = useMemo(() => parseMindMap(content), [content]);
-
-  // Toggle collapsed state: collapse expands/collapses the direct subtree.
-  const handleToggle = useCallback((id: string) => {
-    setCollapsedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  // Rebuild the graph whenever the tree or collapsed state changes.
-  const { nodes, edges } = useMemo(() => {
-    if (!tree) return { nodes: [], edges: [] };
-    return buildGraph(tree, collapsedIds, handleToggle);
-  }, [tree, collapsedIds, handleToggle]);
-
-  const handleFullscreenToggle = useCallback(
-    () => setFullscreen((f) => !f),
-    [],
+  const { nodes: baseNodes, edges: baseEdges } = useMemo(
+    () => buildGraph(tree, collapsedIds, (id) => handleToggleRef.current(id)),
+    [tree, collapsedIds],
   );
 
-  // ReactFlow fires onNodeClick with the click target's node data.
-  // We use it to trigger collapse instead of passing callbacks through data,
-  // which avoids re-registering custom node types.
+  // Sync ReactFlow internal state whenever the base graph changes.
+  // (Initial mount and after each animate-out completes.)
+  useEffect(() => {
+    setNodes(baseNodes);
+    setEdges(baseEdges);
+  }, [baseNodes, baseEdges, setNodes, setEdges]);
+
+  const handleToggle = useCallback((id: string) => {
+    if (animating.current) return;
+
+    const isCollapsing = !collapsedIds.has(id);
+
+    if (isCollapsing) {
+      // ── Collapse animation ────────────────────────────────────────────────
+      // 1. Find all descendant ids that are currently visible.
+      // 2. Find the parent's current position in the live ReactFlow nodes.
+      // 3. Move all descendants to the parent's position with opacity 0 /
+      //    scale 0 — CSS transition plays the fly-in-reverse.
+      // 4. After ANIM_MS, commit the new collapsed state (nodes disappear).
+      animating.current = true;
+
+      const subtreeRoot = findNode(tree, id);
+      const departing   = subtreeRoot ? collectDescendantIds(subtreeRoot) : [];
+      const departingSet = new Set(departing);
+
+      setNodes((prev) => {
+        const parentNode = prev.find((n) => n.id === id);
+        const parentPos  = parentNode?.position ?? { x: 0, y: 0 };
+
+        return prev.map((n) => {
+          if (!departingSet.has(n.id)) return n;
+          return {
+            ...n,
+            position: parentPos,
+            data: {
+              ...n.data,
+              // scale(0) collapses the node to a point at the parent's location.
+              animStyle: { opacity: 0, transform: "scale(0)" },
+            },
+          };
+        });
+      });
+
+      setTimeout(() => {
+        setCollapsedIds((prev) => {
+          const next = new Set(prev);
+          next.add(id);
+          return next;
+        });
+        animating.current = false;
+      }, ANIM_MS);
+
+    } else {
+      // ── Expand animation ──────────────────────────────────────────────────
+      // Frame A: inject new nodes at the parent's position, scale(0) opacity(0).
+      //          The browser paints this frame — nodes exist but are invisible.
+      // Frame B (next rAF): set nodes to their real positions with no animStyle.
+      //          The CSS transition on MindMapNode plays the fly-out.
+      const nextCollapsed = new Set(collapsedIds);
+      nextCollapsed.delete(id);
+
+      const { nodes: nextNodes, edges: nextEdges } = buildGraph(
+        tree,
+        nextCollapsed,
+        (nid) => handleToggleRef.current(nid),
+      );
+
+      // Frame A — place new nodes at parent origin, hidden.
+      setNodes((prev) => {
+        const parentNode  = prev.find((n) => n.id === id);
+        const parentPos   = parentNode?.position ?? { x: 0, y: 0 };
+        const existingIds = new Set(prev.map((n) => n.id));
+
+        return nextNodes.map((n) => {
+          if (existingIds.has(n.id)) return n;
+          return {
+            ...n,
+            position: parentPos,
+            data: { ...n.data, animStyle: { opacity: 0, transform: "scale(0)" } },
+          };
+        });
+      });
+      setEdges(nextEdges);
+
+      // Frame B — move to real positions; removing animStyle lets the transition play.
+      requestAnimationFrame(() => {
+        setNodes(() => nextNodes);
+        setCollapsedIds(nextCollapsed);
+      });
+    }
+  }, [collapsedIds, tree, setNodes, setEdges]);
+
+  // Keep the ref in sync so buildGraph always calls the latest handleToggle.
+  handleToggleRef.current = handleToggle;
+
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      // Only toggle if the node has the onClick handler (i.e. has children).
       if (node.data?.onClick) node.data.onClick();
     },
     [],
   );
-
-  if (!tree || nodes.length === 0) {
-    return <p className="text-xs text-muted">No mind map content.</p>;
-  }
 
   const heightClass =
     variant === "expanded" ? "h-mindmap-expanded" : "h-mindmap-card";
 
   const graph = (
     <ReactFlow
-      nodes={nodes}
-      edges={edges}
+      defaultNodes={baseNodes}
+      defaultEdges={baseEdges}
       nodeTypes={NODE_TYPES}
       fitView
       fitViewOptions={{ padding: 0.2 }}
@@ -437,7 +549,7 @@ export default function MindMapRenderer({
       <Controls showInteractive={false} />
       <Panel position="top-right">
         <button
-          onClick={handleFullscreenToggle}
+          onClick={onFullscreenToggle}
           title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
           className="rounded border border-edge bg-panel px-2 py-1 text-xs text-muted hover:border-accent hover:text-white transition-colors"
         >
@@ -448,16 +560,57 @@ export default function MindMapRenderer({
   );
 
   if (fullscreen) {
-    return (
-      <div className="fixed inset-0 z-50 bg-ink">
-        {graph}
-      </div>
-    );
+    return <div className="fixed inset-0 z-50 bg-ink">{graph}</div>;
   }
 
   return (
     <div className={`w-full ${heightClass} rounded-lg border border-edge bg-ink overflow-hidden`}>
       {graph}
     </div>
+  );
+}
+
+// ── MindMapRenderer ───────────────────────────────────────────────────────────
+// Outer shell: parses content, owns fullscreen state, wraps in ReactFlowProvider
+// (required for useReactFlow inside MindMapGraph).
+export default function MindMapRenderer({
+  content,
+  variant,
+}: {
+  content: string;
+  variant: "card" | "expanded";
+}) {
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Exit fullscreen on Escape.
+  useEffect(() => {
+    if (!fullscreen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setFullscreen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
+  const tree = useMemo(() => parseMindMap(content), [content]);
+
+  const handleFullscreenToggle = useCallback(
+    () => setFullscreen((f) => !f),
+    [],
+  );
+
+  if (!tree) {
+    return <p className="text-xs text-muted">No mind map content.</p>;
+  }
+
+  return (
+    <ReactFlowProvider>
+      <MindMapGraph
+        tree={tree}
+        variant={variant}
+        onFullscreenToggle={handleFullscreenToggle}
+        fullscreen={fullscreen}
+      />
+    </ReactFlowProvider>
   );
 }

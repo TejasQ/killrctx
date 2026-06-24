@@ -15,7 +15,7 @@
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import db, { Notebook, Document, Message, Note, Conversation } from "@/lib/db";
+import db, { Notebook, Document, Message, Note, Conversation, MindMapLink } from "@/lib/db";
 import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
 
 export const runtime = "nodejs";
@@ -63,6 +63,14 @@ export async function GET(
       "SELECT * FROM notes WHERE notebook_id = ? ORDER BY created_at DESC",
     )
     .all(id) as Note[];
+  const mindMapLinks = db
+    .prepare(
+      `SELECT mml.* FROM mind_map_links mml
+       JOIN notes n ON n.id = mml.note_id
+       WHERE n.notebook_id = ?
+       ORDER BY mml.created_at DESC`,
+    )
+    .all(id) as MindMapLink[];
 
   // For each document still marked 'indexing', fire a background status check
   // against OpenRAG and update SQLite so the next poll sees the new state.
@@ -132,7 +140,7 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({ notebook, documents, conversations, messages, notes });
+  return NextResponse.json({ notebook, documents, conversations, messages, notes, mindMapLinks });
 }
 
 /**

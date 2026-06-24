@@ -104,6 +104,18 @@ export type Note = {
   created_at: number;
 };
 
+export type MindMapLink = {
+  id:              string;
+  note_id:         string;
+  node_label:      string;
+  // Ancestor breadcrumb, e.g. "Berserker Korg > Abilities > Reckless Attack".
+  // Empty string for root-level nodes. Combined with node_label as a composite
+  // key so two nodes with the same label under different parents stay distinct.
+  node_path:       string;
+  conversation_id: string;
+  created_at:      number;
+};
+
 let _db: Database.Database | null = null;
 
 /**
@@ -127,6 +139,9 @@ function getDb(): Database.Database {
 
   const conn = new Database(join(dataDir, "killrctx.db"));
   conn.pragma("journal_mode = WAL");
+  // Foreign key enforcement is off by default in SQLite — must be set per
+  // connection. Without this, ON DELETE CASCADE declarations are ignored.
+  conn.pragma("foreign_keys = ON");
 
   // Forward-compat micro-migrations. We sniff PRAGMA table_info and ALTER
   // only if a column is missing, which is idempotent across restarts.
@@ -275,7 +290,29 @@ function getDb(): Database.Database {
       created_at  INTEGER NOT NULL,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS mind_map_links (
+      id              TEXT    PRIMARY KEY,
+      note_id         TEXT    NOT NULL,
+      node_label      TEXT    NOT NULL,
+      node_path       TEXT    NOT NULL DEFAULT '',
+      conversation_id TEXT    NOT NULL,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY(note_id)         REFERENCES notes(id)         ON DELETE CASCADE,
+      FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_mind_map_links_note ON mind_map_links(note_id);
+    CREATE INDEX IF NOT EXISTS idx_mind_map_links_conv ON mind_map_links(conversation_id);
   `);
+
+  // Add node_path column to mind_map_links if it doesn't exist yet.
+  // Existing rows get '' (empty string) which is the correct value for links
+  // created before we started tracking ancestor paths.
+  const hasNodePath = (
+    conn.prepare(`PRAGMA table_info(mind_map_links)`).all() as { name: string }[]
+  ).some((col) => col.name === "node_path");
+  if (!hasNodePath) {
+    conn.exec(`ALTER TABLE mind_map_links ADD COLUMN node_path TEXT NOT NULL DEFAULT ''`);
+  }
 
   // Migrate legacy `podcasts` table into `notes` on first boot after upgrade.
   // INSERT OR IGNORE is idempotent — safe to run on every restart.

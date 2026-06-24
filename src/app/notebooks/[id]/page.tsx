@@ -31,7 +31,7 @@
 
 "use client";
 
-import React, { use, useEffect, useRef, useState } from "react";
+import React, { use, useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
@@ -47,6 +47,7 @@ import ModelPickerPopover from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
 import SourceCitation from "@/components/SourceCitation";
 import type { Source } from "openrag-sdk";
+import type { MindMapLink } from "@/lib/db";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
@@ -81,6 +82,12 @@ export default function NotebookPage({
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [mindMapLinks, setMindMapLinks] = useState<MindMapLink[]>([]);
+  // A framed question waiting to be sent once activeConvId is committed to state.
+  // Set by handleNodeClick after creating a new conversation; consumed by ChatPanel.
+  const [pendingAsk, setPendingAsk] = useState<string | null>(null);
+  // Picker state: shown when a node has multiple linked conversations to choose from.
+  const [nodePickerState, setNodePickerState] = useState<{ label: string; convIds: string[]; noteId: string; noteTopic: string | null; ancestorLabels: string[] } | null>(null);
   // Doc IDs the user has checked in the Sources panel. Empty = all docs in scope.
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
@@ -144,7 +151,85 @@ export default function NotebookPage({
     setActiveConvId((prev) => prev ?? data.conversations?.[0]?.id ?? null);
     setMessages(data.messages);
     setNotes(data.notes);
+    setMindMapLinks(data.mindMapLinks ?? []);
   }
+
+  // frameQuestion builds the contextual question string sent to chat.
+  // Includes an ancestor breadcrumb so the LLM knows where in the map the node
+  // lives — e.g. "under: Berserker Korg > Abilities > Reckless Attack".
+  function frameQuestion(
+    label:          string,
+    ancestorLabels: string[],
+    topic:          string | null | undefined,
+  ): string {
+    const breadcrumb = ancestorLabels.length > 0
+      ? ` (under: ${ancestorLabels.join(" > ")})`
+      : "";
+    const context = topic?.trim()
+      ? ` in the context of ${topic.trim()}`
+      : "";
+    return `Tell me more about "${label}"${breadcrumb}${context}.`;
+  }
+
+  // createAndLink: creates a new conversation for a node, sends the framed
+  // question, and writes the mind_map_links record. Called on the first click
+  // of an unlinked node or when the user picks "New conversation" in the picker.
+  const createAndLink = useCallback(async (
+    nodeLabel:      string,
+    noteId:         string,
+    noteTopic:      string | null,
+    ancestorLabels: string[],
+  ) => {
+    const convRes = await fetch(`/api/notebooks/${id}/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: `🔗 ${nodeLabel} — ${notebook?.title ?? ""}` }),
+    });
+    if (!convRes.ok) return;
+    const { conversation } = await convRes.json() as { conversation: Conversation };
+
+    // Register conversation in state and make it active.
+    setConversations((cs) => [...cs, conversation]);
+    setActiveConvId(conversation.id);
+
+    // Queue the framed question — ChatPanel's useEffect will send it once
+    // activeConvId is committed to state.
+    setPendingAsk(frameQuestion(nodeLabel, ancestorLabels, noteTopic));
+
+    // Persist the link record. nodePath is the ancestor breadcrumb stored in
+    // the DB so lookups can distinguish same-label nodes under different parents.
+    const nodePath = ancestorLabels.join(" > ");
+    const linkRes = await fetch(`/api/notebooks/${id}/mind-map-links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ noteId, nodeLabel, nodePath, conversationId: conversation.id }),
+    });
+    if (linkRes.ok) {
+      const { link } = await linkRes.json() as { link: MindMapLink };
+      setMindMapLinks((links) => [...links, link]);
+    }
+  }, [id, notebook?.title]);
+
+  // handleNodeClick: called by MindMapRenderer when a node is clicked.
+  // Decides whether to create a new conversation, reopen an existing one, or
+  // show the picker when multiple conversations are linked to the same node.
+  const handleNodeClick = useCallback((
+    nodeLabel:      string,
+    linkedConvIds:  string[],
+    noteId:         string,
+    noteTopic:      string | null,
+    ancestorLabels: string[],
+  ) => {
+    if (linkedConvIds.length === 0) {
+      void createAndLink(nodeLabel, noteId, noteTopic, ancestorLabels);
+    } else if (linkedConvIds.length === 1) {
+      // One conversation — jump straight to it.
+      setActiveConvId(linkedConvIds[0]);
+    } else {
+      // Multiple conversations — let the user pick.
+      setNodePickerState({ label: nodeLabel, convIds: linkedConvIds, noteId, noteTopic, ancestorLabels });
+    }
+  }, [createAndLink]);
   useEffect(() => {
     refresh();
   }, [id]);
@@ -175,6 +260,7 @@ export default function NotebookPage({
   }
 
   return (
+    <>
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-edge px-4 py-3">
         <div className="flex items-center gap-3">
@@ -265,6 +351,9 @@ export default function NotebookPage({
             setActiveConvId(conv.id);
           }}
           onConvDeleted={(deletedId, replacement) => {
+            // Remove any mind map links pointing to this conversation so count
+            // badges disappear immediately without waiting for a full refresh.
+            setMindMapLinks((links) => links.filter((l) => l.conversation_id !== deletedId));
             if (replacement) {
               setConversations((cs) =>
                 cs.map((c) => (c.id === deletedId ? replacement : c)),
@@ -292,10 +381,14 @@ export default function NotebookPage({
               ? documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.filename)
               : []
           }
+          pendingSend={pendingAsk}
+          onPendingSendConsumed={() => setPendingAsk(null)}
         />
         <StudioPanel
           notebookId={id}
           notes={notes}
+          mindMapLinks={mindMapLinks}
+          onNodeClick={handleNodeClick}
           onCreated={refresh}
           onDeleted={refresh}
           onExpandChange={setStudioExpanded}
@@ -308,6 +401,80 @@ export default function NotebookPage({
               : []
           }
         />
+      </div>
+    </div>
+
+    {/* Node picker: shown when a mind map node has multiple linked conversations */}
+    {nodePickerState && (
+      <NodePickerPopover
+        label={nodePickerState.label}
+        convIds={nodePickerState.convIds}
+        conversations={conversations}
+        onSelect={(convId) => { setActiveConvId(convId); setNodePickerState(null); }}
+        onNew={() => {
+          void createAndLink(nodePickerState.label, nodePickerState.noteId, nodePickerState.noteTopic, nodePickerState.ancestorLabels);
+          setNodePickerState(null);
+        }}
+        onClose={() => setNodePickerState(null)}
+      />
+    )}
+    </>
+  );
+}
+
+// ============================================================================
+// NodePickerPopover — shown when a node has multiple linked conversations
+// ============================================================================
+// _Basically_, when the user clicks a node that has been researched more than
+// once, this popover lets them choose which conversation to reopen — or start
+// a brand new one. Clicking the backdrop dismisses it.
+// ============================================================================
+function NodePickerPopover({
+  label,
+  convIds,
+  conversations,
+  onSelect,
+  onNew,
+  onClose,
+}: {
+  label:         string;
+  convIds:       string[];
+  conversations: Conversation[];
+  onSelect:      (convId: string) => void;
+  onNew:         () => void;
+  onClose:       () => void;
+}) {
+  const linked = conversations.filter((c) => convIds.includes(c.id));
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        className="w-72 rounded-xl border border-edge bg-panel p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-muted">
+          Research threads for
+        </div>
+        <div className="mb-3 truncate text-sm font-medium text-white">{label}</div>
+        <div className="space-y-1.5">
+          {linked.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onSelect(c.id)}
+              className="w-full rounded-lg border border-edge bg-ink/60 px-3 py-2 text-left text-sm text-zinc-300 hover:border-accent/60 hover:text-white transition"
+            >
+              {c.title}
+            </button>
+          ))}
+          <button
+            onClick={onNew}
+            className="w-full rounded-lg border border-dashed border-edge px-3 py-2 text-left text-sm text-muted hover:border-accent/60 hover:text-white transition"
+          >
+            + New conversation
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -977,6 +1144,8 @@ function ChatPanel({
   onConvDeleted,
   onConvRenamed,
   selectedFilenames,
+  pendingSend,
+  onPendingSendConsumed,
 }: {
   notebookId: string;
   messages: Message[];
@@ -989,6 +1158,9 @@ function ChatPanel({
   onConvRenamed: (convId: string, title: string) => void;
   /** Filenames checked in Sources panel; empty = use all notebook docs. */
   selectedFilenames: string[];
+  /** A question from a mind map node click waiting to be sent. Cleared by onPendingSendConsumed. */
+  pendingSend: string | null;
+  onPendingSendConsumed: () => void;
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -1060,25 +1232,22 @@ function ChatPanel({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [visibleMessages, streamingText]);
 
-  async function send(e: React.FormEvent) {
-    e.preventDefault();
-    if (!input.trim() || !activeConvId) return;
+  // sendText: the core send logic, extracted so it can be called both from the
+  // form submit handler and from the pendingSend useEffect (mind map node clicks).
+  async function sendText(text: string, convId: string) {
+    if (!text.trim() || !convId) return;
     setSending(true);
     setStreamingText("");
     setError(null);
-    // Clear previous turn's streaming sources so they don't show on the new bubble.
     setMessageSources((prev) => { const m = new Map(prev); m.delete("streaming"); return m; });
-    const sentInput = input;
-    setInput("");
 
     try {
       const res = await fetch(`/api/notebooks/${notebookId}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          content: sentInput,
-          conversationId: activeConvId,
-          // Only send when non-empty — the route treats absence as "all docs".
+          content: text,
+          conversationId: convId,
           ...(selectedFilenames.length > 0 && { selectedFilenames }),
         }),
       });
@@ -1087,7 +1256,6 @@ function ChatPanel({
         throw new Error(data.error ?? `chat failed (${res.status})`);
       }
 
-      // Read the SSE stream line by line, appending each delta to streamingText.
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -1097,7 +1265,6 @@ function ChatPanel({
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE lines are terminated by \n\n — process all complete events.
         const parts = buffer.split("\n\n");
         buffer = parts.pop() ?? "";
 
@@ -1116,13 +1283,11 @@ function ChatPanel({
             setStreamingText((prev) => prev + payload.text);
           } else if (payload.type === "sources" && Array.isArray(payload.sources)) {
             const sources = payload.sources as Source[];
-            // Store in ref so we can re-key to the real message ID after refresh.
             pendingSourcesRef.current = sources;
-            // Also set "streaming" key so the footer shows during live streaming.
             setMessageSources((prev) => new Map(prev).set("streaming", sources));
           } else if (payload.type === "done") {
-            if (payload.conversationTitle && activeConvId) {
-              onConvRenamed(activeConvId, payload.conversationTitle);
+            if (payload.conversationTitle && convId) {
+              onConvRenamed(convId, payload.conversationTitle);
             }
           } else if (payload.type === "error") {
             throw new Error(payload.error ?? "chat failed");
@@ -1130,7 +1295,7 @@ function ChatPanel({
         }
       }
 
-      onSent(); // triggers refresh — replaces streamingText with the real message row
+      onSent();
     } catch (e) {
       setError(e instanceof Error ? e.message : "chat failed");
     } finally {
@@ -1138,6 +1303,23 @@ function ChatPanel({
       setStreamingText("");
     }
   }
+
+  async function send(e: React.FormEvent) {
+    e.preventDefault();
+    if (!input.trim() || !activeConvId) return;
+    const sentInput = input;
+    setInput("");
+    await sendText(sentInput, activeConvId);
+  }
+
+  // When a mind map node click queues a question, fire it as soon as both the
+  // question text and the target conversation ID are available.
+  useEffect(() => {
+    if (!pendingSend || !activeConvId) return;
+    onPendingSendConsumed();
+    void sendText(pendingSend, activeConvId);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSend, activeConvId]);
 
   async function newConversation() {
     setCreatingConv(true);
@@ -1319,6 +1501,8 @@ type NoteTypeKey = (typeof NOTE_TYPES)[number]["type"];
 function StudioPanel({
   notebookId,
   notes,
+  mindMapLinks,
+  onNodeClick,
   onCreated,
   onDeleted,
   onExpandChange,
@@ -1329,6 +1513,8 @@ function StudioPanel({
 }: {
   notebookId: string;
   notes: Note[];
+  mindMapLinks: MindMapLink[];
+  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
   onCreated: () => void;
   onDeleted: () => void;
   onExpandChange: (expanded: boolean) => void;
@@ -1506,6 +1692,13 @@ function StudioPanel({
         <MindMapRenderer
           content={expandedNote.content}
           variant={expandedFullscreen ? "fullscreen" : "expanded"}
+          noteId={expandedNote.id}
+          mindMapLinks={mindMapLinks}
+          onNodeClick={(label, convIds, ancestors) => {
+            // For fullscreen: close first, then fire inquiry (REQ-005).
+            if (expandedFullscreen) setExpandedFullscreen(false);
+            onNodeClick(label, convIds, expandedNote.id, expandedNote.topic, ancestors);
+          }}
         />
       </div>
     ) : (
@@ -1648,6 +1841,8 @@ function StudioPanel({
               <NoteCard
                 key={note.id}
                 note={note}
+                mindMapLinks={mindMapLinks}
+                onNodeClick={onNodeClick}
                 onDelete={() => deleteNote(note.id)}
                 onExpand={() => setExpandedId(note.id)}
               />
@@ -1714,7 +1909,19 @@ function PodcastCard({ note, onDelete }: { note: Note; onDelete: () => void }) {
 // Click the row to expand/collapse an inline preview. The ⤢ button opens
 // the full reading view (fills the Studio panel). Delete on hover.
 // ============================================================================
-function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => void; onExpand: () => void }) {
+function NoteCard({
+  note,
+  mindMapLinks,
+  onNodeClick,
+  onDelete,
+  onExpand,
+}: {
+  note: Note;
+  mindMapLinks: MindMapLink[];
+  onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
+  onDelete: () => void;
+  onExpand: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const meta = NOTE_TYPES.find((t) => t.type === note.type);
@@ -1733,7 +1940,19 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
     if (!note.content) return <p className="text-xs text-muted">No content yet.</p>;
     if (note.type === "outline") return <OutlineRenderer content={note.content} topic={note.topic} />;
     if (note.type === "mindmap") {
-      return <MindMapRenderer content={note.content} variant={inFullscreen ? "fullscreen" : "card"} />;
+      return (
+        <MindMapRenderer
+          content={note.content}
+          variant={inFullscreen ? "fullscreen" : "card"}
+          noteId={note.id}
+          mindMapLinks={mindMapLinks}
+          onNodeClick={(label, convIds, ancestors) => {
+            // For fullscreen: exit before firing (REQ-005).
+            if (inFullscreen) setFullscreen(false);
+            onNodeClick(label, convIds, note.id, note.topic, ancestors);
+          }}
+        />
+      );
     }
     return (
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>

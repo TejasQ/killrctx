@@ -8,16 +8,14 @@
 // horizontal left-to-right graph, and hands the result to ReactFlow to render.
 //
 // Visual design principles applied here:
-//   - All colours come from the app's Tailwind tokens (ink, panel, edge, accent)
-//     via CSS variables — no hardcoded hex except the edge token (#222226) which
-//     ReactFlow's style prop requires as a JS string.
-//   - Nodes are sized by depth: root > branch > leaf.
-//   - Each top-level branch inherits one hue from BRANCH_COLORS; depth drives
-//     opacity within that hue so the hierarchy reads at a glance.
-//   - Source/citation nodes (lines containing "(Source:") are visually muted
-//     and smaller — they're references, not concepts.
-//   - Fullscreen: a toggle button inside the graph mounts a fixed overlay so
-//     the user can explore large maps without the Studio panel's constraints.
+//   - Solid dark fills per branch (not transparent) — matches the reference
+//     NotebookLM style where nodes are visually distinct blocks.
+//   - Each top-level branch gets one of BRANCH_COLORS. Deeper nodes use the
+//     same hue but slightly darker fills.
+//   - Nodes with children show a collapse indicator (< when expanded, > when
+//     collapsed). Clicking them toggles visibility of all descendants.
+//   - Source/citation nodes (lines containing "(Source:") are muted.
+//   - Fullscreen: a toggle button inside the graph mounts a fixed overlay.
 //
 // Layout constants live at the top — change them to adjust the feel of the
 // graph without touching the render logic.
@@ -36,87 +34,74 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-// JS pixel values — Tailwind can't drive ReactFlow's x/y coordinate math.
-const NODE_X_STEP = 280; // horizontal gap between depth levels
-const NODE_Y_STEP = 80;  // vertical gap between sibling nodes
+const NODE_X_STEP = 300; // horizontal gap between depth levels
+const NODE_Y_STEP = 68;  // vertical gap between sibling nodes
 
 // Per-depth node dimensions. Index = depth level; last entry applies to all
 // deeper levels.
 const DEPTH_STYLES: { width: number; height: number; fontSize: number; fontWeight: number }[] = [
-  { width: 200, height: 44, fontSize: 15, fontWeight: 700 }, // depth 0 — root
-  { width: 170, height: 38, fontSize: 13, fontWeight: 600 }, // depth 1 — branch
-  { width: 150, height: 32, fontSize: 12, fontWeight: 400 }, // depth 2 — sub-branch
-  { width: 140, height: 28, fontSize: 11, fontWeight: 400 }, // depth 3+ — leaf
+  { width: 210, height: 46, fontSize: 15, fontWeight: 700 }, // depth 0 — root
+  { width: 180, height: 40, fontSize: 13, fontWeight: 600 }, // depth 1 — branch
+  { width: 160, height: 34, fontSize: 12, fontWeight: 500 }, // depth 2 — sub-branch
+  { width: 150, height: 30, fontSize: 11, fontWeight: 400 }, // depth 3+ — leaf
 ];
 
 // Source/citation nodes are smaller and muted.
 const SOURCE_STYLE = { width: 130, height: 26, fontSize: 10, fontWeight: 400 };
 
-// One hue per top-level branch. These are the same accent colours used by the
-// note-type grid cards — intentional visual language continuity.
-// Format: [border hex, background hex (with opacity in style)]
-const BRANCH_COLORS = [
-  { border: "#7c5cff", bg: "rgba(124,92,255,0.15)"  }, // accent purple
-  { border: "#ec4899", bg: "rgba(236,72,153,0.15)"  }, // pink
-  { border: "#0ea5e9", bg: "rgba(14,165,233,0.15)"  }, // sky
-  { border: "#6366f1", bg: "rgba(99,102,241,0.15)"  }, // indigo
-  { border: "#10b981", bg: "rgba(16,185,129,0.15)"  }, // emerald
-  { border: "#f59e0b", bg: "rgba(245,158,11,0.15)"  }, // amber
+// Solid dark fills for each branch, inspired by the reference's muted-but-
+// distinct color blocks. Each entry: [dark fill, border/accent].
+// These are NOT rgba — the reference uses solid backgrounds.
+const BRANCH_COLORS: { fill: string; border: string; text: string; childFill: string }[] = [
+  { fill: "#1e1b4b", border: "#6366f1", text: "#c7d2fe", childFill: "#1a1840" }, // indigo
+  { fill: "#134e4a", border: "#14b8a6", text: "#99f6e4", childFill: "#113d3a" }, // teal
+  { fill: "#3b0764", border: "#a855f7", text: "#e9d5ff", childFill: "#2e0550" }, // purple
+  { fill: "#1c1917", border: "#f97316", text: "#fed7aa", childFill: "#171412" }, // orange
+  { fill: "#0c1a2e", border: "#3b82f6", text: "#bfdbfe", childFill: "#091525" }, // blue
+  { fill: "#1a0a00", border: "#f59e0b", text: "#fde68a", childFill: "#140800" }, // amber
 ];
 
-// ── Tree type ─────────────────────────────────────────────────────────────────
+// ── TreeNode ──────────────────────────────────────────────────────────────────
 type TreeNode = {
-  id:       string;
-  label:    string;
-  depth:    number;
-  // Index of the top-level branch this node belongs to (for colour inheritance).
+  id:          string;
+  label:       string;
+  depth:       number;
   branchIndex: number;
-  isSource: boolean;
-  children: TreeNode[];
+  isSource:    boolean;
+  children:    TreeNode[];
 };
 
 // ── LEAKAGE_FILTERS ───────────────────────────────────────────────────────────
 // Patterns that indicate LLM leakage: source citations, JSON fragments, or
-// prose sentences that don't belong in a concept label. Any label matching one
-// of these is silently dropped from the tree rather than rendered as a node.
-// This is a defence-in-depth measure — the prompt already forbids these, but
-// models sometimes leak them anyway.
+// prose sentences that don't belong in a concept label.
 const LEAKAGE_FILTERS: RegExp[] = [
-  /\(Source:/i,          // citation parenthetical
-  /^\s*\{/,             // JSON object
-  /^\s*"/,              // JSON string fragment
-  /[.!?]\s+[A-Z]/,      // mid-sentence capital after punctuation (prose)
-  /\{[^}]+\}/,          // any {placeholder} or tool-call leak e.g. {search_query}
+  /\(Source:/i,
+  /^\s*\{/,
+  /^\s*"/,
+  /[.!?]\s+[A-Z]/,
+  /\{[^}]+\}/,
 ];
-// Labels longer than this are almost certainly prose, not concept labels.
 const MAX_LABEL_LENGTH = 60;
 
 // ── parseMindMap ──────────────────────────────────────────────────────────────
-// Converts a nested markdown list string into a TreeNode tree.
-// Only lines starting with "- " (after stripping leading spaces) are processed.
-// Depth is Math.floor(leadingSpaces / 2), matching the AI prompt convention.
-// Labels matching LEAKAGE_FILTERS or exceeding MAX_LABEL_LENGTH are dropped.
 function parseMindMap(content: string): TreeNode | null {
   const lines = content.split("\n");
   const stack: TreeNode[] = [];
   let root:        TreeNode | null = null;
-  let branchCount = 0; // increments for each depth-1 node to assign hue
+  let branchCount = 0;
 
   for (const line of lines) {
     const match = line.match(/^(\s*)- (.+)/);
     if (!match) continue;
 
-    const depth    = Math.floor(match[1].length / 2);
-    const label    = match[2].trim();
+    const depth = Math.floor(match[1].length / 2);
+    const label = match[2].trim();
 
-    // Drop any label that looks like LLM leakage.
     if (label.length > MAX_LABEL_LENGTH) continue;
     if (LEAKAGE_FILTERS.some((re) => re.test(label))) continue;
 
-    // isSource is kept for any residual parenthetical that slips through.
     const isSource = label.startsWith("(") && label.endsWith(")");
 
-    // Stable ID: join ancestor ids + position among siblings.
     const id =
       depth === 0
         ? "0"
@@ -125,8 +110,6 @@ function parseMindMap(content: string): TreeNode | null {
             .map((n) => n.id)
             .join("-") + `-${stack[depth - 1]?.children.length ?? 0}`;
 
-    // Branch index: depth-1 nodes each get the next colour; deeper nodes
-    // inherit from their depth-1 ancestor via the stack.
     let branchIndex = 0;
     if (depth === 0) {
       branchIndex = 0;
@@ -147,7 +130,7 @@ function parseMindMap(content: string): TreeNode | null {
       if (parent) {
         parent.children.push(node);
         stack[depth] = node;
-        stack.splice(depth + 1); // clear stale deeper ancestors
+        stack.splice(depth + 1);
       }
     }
   }
@@ -156,102 +139,148 @@ function parseMindMap(content: string): TreeNode | null {
 }
 
 // ── nodeStyle ─────────────────────────────────────────────────────────────────
-// Returns the inline `style` object for a ReactFlow node.
-// We use inline styles (not className) because ReactFlow's default stylesheet
-// has higher specificity than Tailwind utility classes on the node wrapper.
+// Solid fills per branch — the key visual change from the previous version.
+// The reference shows clearly readable blocks, not barely-tinted glass cards.
 function nodeStyle(
   tn: TreeNode,
   depth: number,
+  collapsed: boolean,
 ): React.CSSProperties {
   const ds   = DEPTH_STYLES[Math.min(depth, DEPTH_STYLES.length - 1)];
   const dims = tn.isSource ? SOURCE_STYLE : ds;
   const col  = BRANCH_COLORS[tn.branchIndex];
 
   if (tn.isSource) {
-    // Source nodes: muted, no branch colour, italic label handled via labelStyle.
     return {
-      width:           dims.width,
-      height:          dims.height,
-      fontSize:        dims.fontSize,
-      fontWeight:      dims.fontWeight,
-      background:      "#141416",        // panel token
-      border:          "1px solid #222226", // edge token
-      borderRadius:    6,
-      color:           "#8a8a92",        // muted token
-      display:         "flex",
-      alignItems:      "center",
-      justifyContent:  "center",
-      padding:         "0 8px",
-      fontStyle:       "italic",
-      opacity:         0.75,
+      width:          dims.width,
+      height:         dims.height,
+      fontSize:       dims.fontSize,
+      fontWeight:     dims.fontWeight,
+      background:     "#141416",
+      border:         "1px solid #222226",
+      borderRadius:   6,
+      color:          "#8a8a92",
+      display:        "flex",
+      alignItems:     "center",
+      justifyContent: "center",
+      padding:        "0 8px",
+      fontStyle:      "italic",
+      opacity:        0.75,
     };
   }
 
   if (depth === 0) {
-    // Root: accent-coloured, prominent.
     return {
-      width:           dims.width,
-      height:          dims.height,
-      fontSize:        dims.fontSize,
-      fontWeight:      dims.fontWeight,
-      background:      "rgba(124,92,255,0.2)", // accent/20
-      border:          "2px solid #7c5cff",    // accent token
-      borderRadius:    10,
-      color:           "#ffffff",
-      display:         "flex",
-      alignItems:      "center",
-      justifyContent:  "center",
-      padding:         "0 12px",
-      boxShadow:       "0 0 16px rgba(124,92,255,0.25)",
+      width:          dims.width,
+      height:         dims.height,
+      fontSize:       dims.fontSize,
+      fontWeight:     dims.fontWeight,
+      background:     "#1e1b4b",
+      border:         "2px solid #7c5cff",
+      borderRadius:   10,
+      color:          "#ffffff",
+      display:        "flex",
+      alignItems:     "center",
+      justifyContent: "center",
+      padding:        "0 12px",
+      boxShadow:      "0 0 18px rgba(124,92,255,0.30)",
+      cursor:         tn.children.length > 0 ? "pointer" : "default",
     };
   }
 
-  // Branch and leaf nodes: inherit the branch hue, fading with depth.
-  const opacityFactor = Math.max(0.4, 1 - (depth - 1) * 0.2);
+  // Branch and leaf nodes: solid dark fill, full-opacity border.
+  // Child nodes use a slightly darker variant of the branch fill.
+  const fill = depth === 1 ? col.fill : col.childFill;
   return {
-    width:           dims.width,
-    height:          dims.height,
-    fontSize:        dims.fontSize,
-    fontWeight:      dims.fontWeight,
-    background:      col.bg,
-    border:          `1px solid ${col.border}`,
-    borderRadius:    8,
-    color:           depth === 1 ? "#ffffff" : "#d1d5db",
-    display:         "flex",
-    alignItems:      "center",
-    justifyContent:  "center",
-    padding:         "0 10px",
-    opacity:         opacityFactor,
+    width:          dims.width,
+    height:         dims.height,
+    fontSize:       dims.fontSize,
+    fontWeight:     dims.fontWeight,
+    background:     fill,
+    border:         `1px solid ${col.border}`,
+    borderRadius:   8,
+    color:          col.text,
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "space-between",
+    padding:        "0 10px",
+    gap:            "6px",
+    cursor:         tn.children.length > 0 ? "pointer" : "default",
+    // Subtle glow on branch-level nodes that have children.
+    boxShadow:      depth === 1 && tn.children.length > 0
+      ? `0 0 8px ${col.border}40`
+      : undefined,
   };
 }
 
+// ── collapseIndicator ─────────────────────────────────────────────────────────
+// The < / > badge shown on nodes that have children, matching the reference UI.
+// We render it as a separate tiny span inside the node label string.
+// ReactFlow's `data.label` accepts a React element, so we pass JSX.
+function nodeLabel(tn: TreeNode, collapsed: boolean): React.ReactNode {
+  const hasChildren = tn.children.length > 0;
+  if (!hasChildren || tn.isSource) return tn.label;
+
+  const indicator = collapsed ? "›" : "‹";
+  const indicatorStyle: React.CSSProperties = {
+    display:        "inline-flex",
+    alignItems:     "center",
+    justifyContent: "center",
+    width:          18,
+    height:         18,
+    borderRadius:   4,
+    background:     "rgba(255,255,255,0.08)",
+    fontSize:       11,
+    lineHeight:     1,
+    flexShrink:     0,
+    color:          "inherit",
+    opacity:        0.75,
+  };
+
+  return (
+    <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {tn.label}
+      </span>
+      <span style={indicatorStyle}>{indicator}</span>
+    </span>
+  );
+}
+
 // ── buildGraph ────────────────────────────────────────────────────────────────
-// BFS → ReactFlow nodes[] + edges[].
-// Layout: horizontal left-to-right tree. Each depth level is NODE_X_STEP px to
-// the right. Siblings are spaced NODE_Y_STEP px apart, parents centred over
-// their children.
-function buildGraph(root: TreeNode): { nodes: Node[]; edges: Edge[] } {
+// Walks the tree and produces ReactFlow nodes[] + edges[], skipping any subtree
+// whose root is in `collapsedIds`. Collapsed nodes still appear; their children
+// do not. Layout is the same horizontal BFS as before.
+function buildGraph(
+  root: TreeNode,
+  collapsedIds: Set<string>,
+  onToggle: (id: string) => void,
+): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  // Collect all items in BFS order, recording parent relationship.
   type Item = { tn: TreeNode; depth: number; parentId: string | null };
   const all: Item[] = [];
   const queue: Item[] = [{ tn: root, depth: 0, parentId: null }];
+
+  // BFS — but skip children of collapsed nodes.
   while (queue.length) {
     const item = queue.shift()!;
     all.push(item);
-    for (const child of item.tn.children) {
-      queue.push({ tn: child, depth: item.depth + 1, parentId: item.tn.id });
+    // Only enqueue children if this node is NOT collapsed.
+    if (!collapsedIds.has(item.tn.id)) {
+      for (const child of item.tn.children) {
+        queue.push({ tn: child, depth: item.depth + 1, parentId: item.tn.id });
+      }
     }
   }
 
-  // Assign Y positions: recurse from root, accumulate a leaf counter so each
-  // leaf gets a unique row; parents centre over their children's Y range.
+  // Y layout over the visible subset only.
   let leafY = 0;
   const yMap: Record<string, number> = {};
   function assignY(tn: TreeNode): number {
-    if (tn.children.length === 0) {
+    // If collapsed, treat as a leaf even if it has children.
+    if (tn.children.length === 0 || collapsedIds.has(tn.id)) {
       yMap[tn.id] = leafY * NODE_Y_STEP;
       leafY++;
       return yMap[tn.id];
@@ -263,12 +292,18 @@ function buildGraph(root: TreeNode): { nodes: Node[]; edges: Edge[] } {
   assignY(root);
 
   for (const { tn, depth, parentId } of all) {
+    const collapsed = collapsedIds.has(tn.id);
+    const label     = nodeLabel(tn, collapsed);
+    // Nodes with children get an onClick stored in data so handleNodeClick can
+    // fire the collapse toggle. Leaf nodes just carry the label.
+    const data = tn.children.length > 0
+      ? { label, onClick: () => onToggle(tn.id) }
+      : { label };
     nodes.push({
       id:       tn.id,
-      data:     { label: tn.label },
+      data,
       position: { x: depth * NODE_X_STEP, y: yMap[tn.id] },
-      style:    nodeStyle(tn, depth),
-      // Suppress ReactFlow's default node chrome (handles, selection ring).
+      style:    nodeStyle(tn, depth, collapsed),
       type:     "default",
     });
 
@@ -280,8 +315,8 @@ function buildGraph(root: TreeNode): { nodes: Node[]; edges: Edge[] } {
         target: tn.id,
         style:  {
           stroke:      tn.isSource ? "#222226" : col.border,
-          strokeWidth: depth === 1 ? 2 : 1,
-          opacity:     tn.isSource ? 0.4 : 0.6,
+          strokeWidth: depth === 1 ? 2 : 1.5,
+          opacity:     tn.isSource ? 0.4 : 0.7,
         },
       });
     }
@@ -299,6 +334,8 @@ export default function MindMapRenderer({
   variant: "card" | "expanded";
 }) {
   const [fullscreen, setFullscreen] = useState(false);
+  // Set of node ids that are currently collapsed.
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   // Exit fullscreen on Escape.
   useEffect(() => {
@@ -310,18 +347,45 @@ export default function MindMapRenderer({
     return () => window.removeEventListener("keydown", onKey);
   }, [fullscreen]);
 
+  // Parse the tree once; only depends on content.
+  const tree = useMemo(() => parseMindMap(content), [content]);
+
+  // Toggle collapsed state: collapse expands/collapses the direct subtree.
+  const handleToggle = useCallback((id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  // Rebuild the graph whenever the tree or collapsed state changes.
   const { nodes, edges } = useMemo(() => {
-    const root = parseMindMap(content);
-    if (!root) return { nodes: [], edges: [] };
-    return buildGraph(root);
-  }, [content]);
+    if (!tree) return { nodes: [], edges: [] };
+    return buildGraph(tree, collapsedIds, handleToggle);
+  }, [tree, collapsedIds, handleToggle]);
 
   const handleFullscreenToggle = useCallback(
     () => setFullscreen((f) => !f),
     [],
   );
 
-  if (nodes.length === 0) {
+  // ReactFlow fires onNodeClick with the click target's node data.
+  // We use it to trigger collapse instead of passing callbacks through data,
+  // which avoids re-registering custom node types.
+  const handleNodeClick = useCallback(
+    (_: React.MouseEvent, node: Node) => {
+      // Only toggle if the node has the onClick handler (i.e. has children).
+      if (node.data?.onClick) node.data.onClick();
+    },
+    [],
+  );
+
+  if (!tree || nodes.length === 0) {
     return <p className="text-xs text-muted">No mind map content.</p>;
   }
 
@@ -337,14 +401,12 @@ export default function MindMapRenderer({
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}
+      onNodeClick={handleNodeClick}
       proOptions={{ hideAttribution: true }}
-      // Override ReactFlow's default white node background globally.
       style={{ background: "#0b0b0c" }}
     >
-      {/* Dark dot grid that matches the app's ink background */}
       <Background color="#222226" gap={28} size={1} />
       <Controls showInteractive={false} />
-      {/* Fullscreen toggle — top-right corner of the graph */}
       <Panel position="top-right">
         <button
           onClick={handleFullscreenToggle}
@@ -357,7 +419,6 @@ export default function MindMapRenderer({
     </ReactFlow>
   );
 
-  // Fullscreen: fixed overlay that fills the viewport.
   if (fullscreen) {
     return (
       <div className="fixed inset-0 z-50 bg-ink">
@@ -367,7 +428,7 @@ export default function MindMapRenderer({
   }
 
   return (
-    <div className={`w-full ${heightClass} rounded-lg border border-edge overflow-hidden`}>
+    <div className={`w-full ${heightClass} rounded-lg border border-edge bg-ink overflow-hidden`}>
       {graph}
     </div>
   );

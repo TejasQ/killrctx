@@ -463,27 +463,23 @@ function MindMapGraph({
       const departing    = subtreeRoot ? collectDescendantIds(subtreeRoot) : [];
       const departingSet = new Set(departing);
 
-      // Phase 1: fade out departing edges immediately (same frame as nodes
-      // starting to fly in). Keeping them visible while nodes move to parentPos
-      // causes them to draw as a zero-length horizontal line at the parent.
+      // Phase 1: fade+shrink departing nodes and fade their edges simultaneously
+      // so everything disappears at the same rate. Nodes use the CSS transition
+      // on MindMapNode's inner div; edges get an SVG opacity transition inline.
+      setNodes((prev) =>
+        prev.map((n) => {
+          if (!departingSet.has(n.id)) return n;
+          return {
+            ...n,
+            data: { ...n.data, animStyle: { opacity: 0, transform: "scale(0)" } },
+          };
+        }),
+      );
       setEdges((prev) => prev.map((e) =>
         departingSet.has(e.source) || departingSet.has(e.target)
           ? { ...e, style: { ...e.style, opacity: 0, transition: `opacity ${ANIM_MS}ms ease` } }
           : e,
       ));
-
-      setNodes((prev) => {
-        const parentNode = prev.find((n) => n.id === id);
-        const parentPos  = parentNode?.position ?? { x: 0, y: 0 };
-        return prev.map((n) => {
-          if (!departingSet.has(n.id)) return n;
-          return {
-            ...n,
-            position: parentPos,
-            data: { ...n.data, animStyle: { opacity: 0, transform: "scale(0)" } },
-          };
-        });
-      });
 
       setTimeout(() => {
         // Phase 2: nodes have finished flying in. Compute the post-collapse

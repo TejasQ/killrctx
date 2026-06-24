@@ -1,6 +1,7 @@
 // ============================================================================
 // MindMapRenderer.tsx — a React component that renders a mindmap note as a
-//                        visual, interactive node graph using ReactFlow
+//                        visual, interactive node graph using ReactFlow.
+//                        Fullscreen is handled at the NoteCard level, not here.
 // ============================================================================
 //
 // _Basically_, mindmap notes are stored as nested markdown lists (- item,
@@ -17,7 +18,7 @@
 //   - Expanding: child nodes fly out from their parent's position.
 //   - Collapsing: child nodes fly back into their parent's position, then vanish.
 //   - Source/citation nodes (lines containing "(Source:") are muted.
-//   - Fullscreen: a toggle button inside the graph mounts a fixed overlay.
+//   - Fullscreen: controlled by the parent NoteCard, not by this component.
 //
 // Layout constants live at the top — change them to adjust the feel of the
 // graph without touching the render logic.
@@ -30,7 +31,6 @@ import ReactFlow, {
   Background,
   Controls,
   Handle,
-  Panel,
   Position,
   ReactFlowProvider,
   useReactFlow,
@@ -405,13 +405,9 @@ function findNode(root: TreeNode, id: string): TreeNode | null {
 function MindMapGraph({
   tree,
   variant,
-  onFullscreenToggle,
-  fullscreen,
 }: {
   tree: TreeNode;
-  variant: "card" | "expanded";
-  onFullscreenToggle: () => void;
-  fullscreen: boolean;
+  variant: "card" | "expanded" | "fullscreen";
 }) {
   const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
@@ -630,8 +626,14 @@ function MindMapGraph({
     [],
   );
 
-  const heightClass =
-    variant === "expanded" ? "h-mindmap-expanded" : "h-mindmap-card";
+  // "fullscreen" fills the flex parent; "expanded" uses the fixed 500 px slot;
+  // "card" uses the smaller 300 px slot in the NoteCard preview.
+  const containerClass =
+    variant === "fullscreen"
+      ? "w-full h-full bg-ink overflow-hidden"
+      : variant === "expanded"
+      ? "w-full h-mindmap-expanded rounded-lg border border-edge bg-ink overflow-hidden"
+      : "w-full h-mindmap-card rounded-lg border border-edge bg-ink overflow-hidden";
 
   const graph = (
     <ReactFlow
@@ -649,57 +651,23 @@ function MindMapGraph({
     >
       <Background color="#222226" gap={28} size={1} />
       <Controls showInteractive={false} />
-      <Panel position="top-right">
-        <button
-          onClick={onFullscreenToggle}
-          title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
-          className="rounded border border-edge bg-panel px-2 py-1 text-xs text-muted hover:border-accent hover:text-white transition-colors"
-        >
-          {fullscreen ? "⊠" : "⛶"}
-        </button>
-      </Panel>
     </ReactFlow>
   );
 
-  if (fullscreen) {
-    return <div className="fixed inset-0 z-50 bg-ink">{graph}</div>;
-  }
-
-  return (
-    <div className={`w-full ${heightClass} rounded-lg border border-edge bg-ink overflow-hidden`}>
-      {graph}
-    </div>
-  );
+  return <div className={containerClass}>{graph}</div>;
 }
 
 // ── MindMapRenderer ───────────────────────────────────────────────────────────
-// Outer shell: parses content, owns fullscreen state, wraps in ReactFlowProvider
-// (required for useReactFlow inside MindMapGraph).
+// Outer shell: parses content, wraps in ReactFlowProvider (required for
+// useReactFlow inside MindMapGraph). Fullscreen is owned by the parent.
 export default function MindMapRenderer({
   content,
   variant,
 }: {
   content: string;
-  variant: "card" | "expanded";
+  variant: "card" | "expanded" | "fullscreen";
 }) {
-  const [fullscreen, setFullscreen] = useState(false);
-
-  // Exit fullscreen on Escape.
-  useEffect(() => {
-    if (!fullscreen) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setFullscreen(false);
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [fullscreen]);
-
   const tree = useMemo(() => parseMindMap(content), [content]);
-
-  const handleFullscreenToggle = useCallback(
-    () => setFullscreen((f) => !f),
-    [],
-  );
 
   if (!tree) {
     return <p className="text-xs text-muted">No mind map content.</p>;
@@ -707,12 +675,7 @@ export default function MindMapRenderer({
 
   return (
     <ReactFlowProvider>
-      <MindMapGraph
-        tree={tree}
-        variant={variant}
-        onFullscreenToggle={handleFullscreenToggle}
-        fullscreen={fullscreen}
-      />
+      <MindMapGraph tree={tree} variant={variant} />
     </ReactFlowProvider>
   );
 }

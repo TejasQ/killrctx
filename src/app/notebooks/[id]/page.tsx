@@ -1346,6 +1346,8 @@ function StudioPanel({
   const [inFlight, setInFlight] = useState<Map<NoteTypeKey, string>>(new Map());
   // ID of the note currently open in full reading view (null = list view).
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Whether the expanded reading view is currently fullscreen.
+  const [expandedFullscreen, setExpandedFullscreen] = useState(false);
 
   const expandedNote = expandedId ? notes.find((n) => n.id === expandedId) ?? null : null;
 
@@ -1423,9 +1425,17 @@ function StudioPanel({
     })();
   }
 
+  // Exit expanded-fullscreen on Escape.
+  useEffect(() => {
+    if (!expandedFullscreen) return;
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") setExpandedFullscreen(false); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expandedFullscreen]);
+
   async function deleteNote(noteId: string) {
     // If the deleted note is currently expanded, return to list view.
-    if (expandedId === noteId) setExpandedId(null);
+    if (expandedId === noteId) { setExpandedId(null); setExpandedFullscreen(false); }
     await fetch(`/api/notebooks/${notebookId}/notes/${noteId}`, { method: "DELETE" });
     onDeleted();
   }
@@ -1457,53 +1467,94 @@ function StudioPanel({
   // ── Expanded reading view ──────────────────────────────────────────────────
   if (expandedNote) {
     const meta = NOTE_TYPES.find((t) => t.type === expandedNote.type);
-    return (
-      <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
-        {resizeHandle}
-        {/* Breadcrumb header: "Studio › Note title" with collapse toggle */}
-        <div className="flex h-10 items-center justify-between border-b border-edge px-4">
+
+    const header = (
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-edge px-4">
+        {expandedFullscreen ? (
+          // In fullscreen the breadcrumb is just the note title — no Studio nav.
+          <span className="text-xs text-white truncate max-w-[200px]">{expandedNote.title}</span>
+        ) : (
           <div className="flex items-center gap-1.5 text-xs text-muted">
             <button onClick={onToggle} className="font-semibold uppercase tracking-wider hover:text-white" title="Collapse Studio">Studio</button>
             <span>›</span>
             <span className="truncate max-w-[160px] text-white">{expandedNote.title}</span>
           </div>
+        )}
+        <div className="flex items-center gap-1">
           <button
-            onClick={() => setExpandedId(null)}
+            onClick={() => setExpandedFullscreen((f) => !f)}
+            className="rounded p-1 text-muted hover:text-white"
+            title={expandedFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+          >
+            {expandedFullscreen ? "⊠" : "⛶"}
+          </button>
+          <button
+            onClick={() => { setExpandedId(null); setExpandedFullscreen(false); }}
             className="rounded p-1 text-muted hover:text-white"
             title="Back to Studio"
           >
             ✕
           </button>
         </div>
-        {/* Full scrollable content */}
-        <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
-          {expandedNote.type === "podcast" ? (
-            // Podcast expanded view: audio player + script
-            <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
-          ) : expandedNote.content ? (
-            expandedNote.type === "outline" ? (
-              <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
-            ) : expandedNote.type === "mindmap" ? (
-              <MindMapRenderer content={expandedNote.content} variant="expanded" />
-            ) : (
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                {fixMarkdown(expandedNote.content)}
-              </ReactMarkdown>
-            )
+      </div>
+    );
+
+    // Mind maps must fill the available space without any padding or overflow
+    // wrapper — the ReactFlow canvas needs a sized flex parent to expand into.
+    const body = expandedNote.type === "mindmap" && expandedNote.content ? (
+      <div className="flex-1 min-h-0">
+        <MindMapRenderer
+          content={expandedNote.content}
+          variant={expandedFullscreen ? "fullscreen" : "expanded"}
+        />
+      </div>
+    ) : (
+      <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
+        {expandedNote.type === "podcast" ? (
+          <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
+        ) : expandedNote.content ? (
+          expandedNote.type === "outline" ? (
+            <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
           ) : (
-            <p className="text-xs text-muted">No content yet.</p>
-          )}
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+              {fixMarkdown(expandedNote.content)}
+            </ReactMarkdown>
+          )
+        ) : (
+          <p className="text-xs text-muted">No content yet.</p>
+        )}
+      </div>
+    );
+
+    const footer = (
+      <div className="flex items-center justify-between border-t border-edge px-4 py-2">
+        <span className="text-xs text-muted">{meta?.icon} {meta?.label}</span>
+        <button
+          onClick={() => deleteNote(expandedNote.id)}
+          className="text-xs text-muted hover:text-red-300"
+        >
+          Delete note
+        </button>
+      </div>
+    );
+
+    if (expandedFullscreen) {
+      return (
+        <div className="fixed inset-0 z-50 flex flex-col bg-panel">
+          {header}
+          {body}
+          {footer}
         </div>
-        {/* Footer: type label + delete */}
-        <div className="flex items-center justify-between border-t border-edge px-4 py-2">
-          <span className="text-xs text-muted">{meta?.icon} {meta?.label}</span>
-          <button
-            onClick={() => deleteNote(expandedNote.id)}
-            className="text-xs text-muted hover:text-red-300"
-          >
-            Delete note
-          </button>
-        </div>
+      );
+    }
+
+    return (
+      <aside className="relative flex min-h-0 flex-col border-l border-edge bg-panel">
+        {resizeHandle}
+        {/* Breadcrumb header: "Studio › Note title" with collapse toggle */}
+        {header}
+        {body}
+        {footer}
       </aside>
     );
   }
@@ -1665,50 +1716,104 @@ function PodcastCard({ note, onDelete }: { note: Note; onDelete: () => void }) {
 // ============================================================================
 function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => void; onExpand: () => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const meta = NOTE_TYPES.find((t) => t.type === note.type);
+
+  // Exit fullscreen on Escape.
+  useEffect(() => {
+    if (!fullscreen) return;
+    function onKey(e: KeyboardEvent) { if (e.key === "Escape") setFullscreen(false); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
+  // Shared content renderer. Mind maps in fullscreen need a special wrapper so
+  // ReactFlow can expand to fill the viewport — other types just scroll normally.
+  function NoteContent({ inFullscreen }: { inFullscreen: boolean }) {
+    if (!note.content) return <p className="text-xs text-muted">No content yet.</p>;
+    if (note.type === "outline") return <OutlineRenderer content={note.content} topic={note.topic} />;
+    if (note.type === "mindmap") {
+      return <MindMapRenderer content={note.content} variant={inFullscreen ? "fullscreen" : "card"} />;
+    }
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {fixMarkdown(note.content)}
+      </ReactMarkdown>
+    );
+  }
+
   return (
-    <div className="group rounded-lg border border-edge">
-      {/* Row is a div so the action buttons inside it are valid HTML */}
-      <div
-        onClick={() => setExpanded((e) => !e)}
-        className="flex w-full cursor-pointer items-center gap-2 p-3 text-left"
-      >
-        <span className="text-sm">{meta?.icon}</span>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium truncate">{note.title}</div>
-          <div className="text-[10px] text-muted">{meta?.label}</div>
+    <>
+      <div className="group rounded-lg border border-edge">
+        {/* Row is a div so the action buttons inside it are valid HTML */}
+        <div
+          onClick={() => setExpanded((e) => !e)}
+          className="flex w-full cursor-pointer items-center gap-2 p-3 text-left"
+        >
+          <span className="text-sm">{meta?.icon}</span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium truncate">{note.title}</div>
+            <div className="text-[10px] text-muted">{meta?.label}</div>
+          </div>
+          <span className="text-xs text-muted">{expanded ? "▾" : "▸"}</span>
+          {/* Expand to full reading view inside the Studio panel */}
+          <button
+            onClick={(e) => { e.stopPropagation(); onExpand(); }}
+            className="text-xs text-muted opacity-0 hover:text-white group-hover:opacity-100"
+            title="Open full view"
+          >
+            ⤢
+          </button>
+          {/* Fullscreen overlay */}
+          <button
+            onClick={(e) => { e.stopPropagation(); setFullscreen(true); }}
+            className="text-xs text-muted opacity-0 hover:text-white group-hover:opacity-100"
+            title="Fullscreen"
+          >
+            ⛶
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
+            title="Delete note"
+          >
+            ✕
+          </button>
         </div>
-        <span className="text-xs text-muted">{expanded ? "▾" : "▸"}</span>
-        {/* Expand to full reading view */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onExpand(); }}
-          className="text-xs text-muted opacity-0 hover:text-white group-hover:opacity-100"
-          title="Open full view"
-        >
-          ⤢
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          className="text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
-          title="Delete note"
-        >
-          ✕
-        </button>
+        {expanded && note.content && (
+          <div className="border-t border-edge px-3 py-2 text-sm">
+            <NoteContent inFullscreen={false} />
+          </div>
+        )}
       </div>
-      {expanded && note.content && (
-        <div className="border-t border-edge px-3 py-2 text-sm">
-          {note.type === "outline" ? (
-            <OutlineRenderer content={note.content} topic={note.topic} />
-          ) : note.type === "mindmap" ? (
-            <MindMapRenderer content={note.content} variant="card" />
+
+      {/* Fullscreen overlay — fixed over the entire viewport */}
+      {fullscreen && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-ink">
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-edge px-4">
+            <span className="text-xs text-muted">{meta?.icon} {meta?.label} — {note.title}</span>
+            <button
+              onClick={() => setFullscreen(false)}
+              className="rounded p-1 text-muted hover:text-white"
+              title="Exit fullscreen (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+          {/* Mind maps need a plain flex container so ReactFlow fills the space;
+              other types use the normal padded scrollable body. */}
+          {note.type === "mindmap" ? (
+            <div className="flex-1 min-h-0">
+              <NoteContent inFullscreen={true} />
+            </div>
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-              {fixMarkdown(note.content)}
-            </ReactMarkdown>
+            <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
+              <NoteContent inFullscreen={true} />
+            </div>
           )}
         </div>
       )}
-    </div>
+    </>
   );
 }
 

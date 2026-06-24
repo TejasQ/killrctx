@@ -1792,13 +1792,23 @@ function NoteCard({ note, onDelete, onExpand }: { note: Note; onDelete: () => vo
         <div className="fixed inset-0 z-50 flex flex-col bg-ink">
           <div className="flex h-10 shrink-0 items-center justify-between border-b border-edge px-4">
             <span className="text-xs text-muted">{meta?.icon} {meta?.label} — {note.title}</span>
-            <button
-              onClick={() => setFullscreen(false)}
-              className="rounded p-1 text-muted hover:text-white"
-              title="Exit fullscreen (Esc)"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-1">
+              {/* Open in the Studio expanded panel while closing the overlay */}
+              <button
+                onClick={() => { setFullscreen(false); onExpand(); }}
+                className="rounded p-1 text-muted hover:text-white"
+                title="Open full view"
+              >
+                ⊠
+              </button>
+              <button
+                onClick={() => setFullscreen(false)}
+                className="rounded p-1 text-muted hover:text-white"
+                title="Exit fullscreen (Esc)"
+              >
+                ✕
+              </button>
+            </div>
           </div>
           {/* Mind maps need a plain flex container so ReactFlow fills the space;
               other types use the normal padded scrollable body. */}

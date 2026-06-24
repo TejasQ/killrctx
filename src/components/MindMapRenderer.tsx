@@ -563,10 +563,11 @@ function MindMapGraph({
       // ── Expand animation ──────────────────────────────────────────────────
       // Frame A: inject new nodes at the parent's position, scale(0) opacity(0).
       //          The browser paints this frame — nodes exist but are invisible.
-      // Frame B (next rAF): set nodes to their real positions with no animStyle.
-      //          The CSS transition on MindMapNode plays the fly-out.
-      // After ANIM_MS: fitView on the parent + new nodes so the whole expanded
-      //          subtree is visible once the fly-out finishes.
+      // Frame B (next rAF): move nodes to real positions — CSS transition plays
+      //          the fly-out over ANIM_MS. Viewport stays still so the parent
+      //          remains visible throughout.
+      // After ANIM_MS: fitView on the parent + new nodes so the full expanded
+      //          subtree scrolls into view once the fly-out finishes.
 
       const nextCollapsed = new Set(collapsedIds);
       nextCollapsed.delete(id);
@@ -577,17 +578,15 @@ function MindMapGraph({
         (nid) => handleToggleRef.current(nid),
       );
 
-      // Collect IDs of nodes that are new (didn't exist before this expand).
-      // We'll fitView on just the parent + these after the fly-out completes.
-      const newNodeIds = new Set(nextNodes.map((n) => n.id));
+      // Collect new node ids before Frame A so we know what to fitView after.
+      let newNodeIds: string[] = [];
 
       // Frame A — place new nodes at parent origin, hidden.
       setNodes((prev) => {
         const parentNode  = prev.find((n) => n.id === id);
         const parentPos   = parentNode?.position ?? { x: 0, y: 0 };
         const existingIds = new Set(prev.map((n) => n.id));
-        // Track which IDs are genuinely new so we can fitView them after fly-out.
-        prev.forEach((n) => newNodeIds.delete(n.id));
+        newNodeIds = nextNodes.map((n) => n.id).filter((nid) => !existingIds.has(nid));
 
         return nextNodes.map((n) => {
           if (existingIds.has(n.id)) return n;
@@ -600,19 +599,19 @@ function MindMapGraph({
       });
       setEdges(nextEdges);
 
-      // Frame B — move to real positions; removing animStyle lets the transition play.
-      // skipNextSync prevents the useEffect from re-snapping positions after
+      // Frame B — move to real positions; CSS transition plays the fly-out.
+      // skipNextSync prevents the useEffect from re-snapping positions when
       // setCollapsedIds triggers a baseNodes recompute.
       requestAnimationFrame(() => {
         setNodes(() => nextNodes);
         skipNextSync.current = true;
         setCollapsedIds(nextCollapsed);
 
-        // After the CSS fly-out finishes, fit the viewport to the parent node
-        // plus all newly revealed children so the full expanded subtree is visible.
+        // After the fly-out completes, pan+zoom to frame the parent and all
+        // newly visible children together.
         setTimeout(() => {
           fitView({
-            nodes:    [{ id }, ...Array.from(newNodeIds).map((nid) => ({ id: nid }))],
+            nodes:    [{ id }, ...newNodeIds.map((nid) => ({ id: nid }))],
             duration: ANIM_MS,
             padding:  0.25,
           });

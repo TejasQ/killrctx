@@ -1212,10 +1212,19 @@ function ChatPanel({
   // After onSent() refreshes the message list, the real assistant message row
   // arrives with its SQLite ID. Re-key the pending sources from "streaming" to
   // that ID so they survive the streaming→stored transition.
+  //
+  // Guard: only re-key when the newest assistant message doesn't already have
+  // sources in the map. Without this, an intermediate refresh that adds only the
+  // user message (the route persists it before streaming starts) would fire this
+  // effect while lastAssistant still points to the *previous* turn's message,
+  // stamping the new sources onto the wrong message ID.
   useEffect(() => {
     if (!pendingSourcesRef.current) return;
     const lastAssistant = [...visibleMessages].reverse().find((m) => m.role === "assistant");
     if (!lastAssistant) return;
+    // If this message already has sources it's a prior turn — skip until the
+    // real new assistant row arrives (which won't be in the map yet).
+    if (messageSources.has(lastAssistant.id)) return;
     const sources = pendingSourcesRef.current;
     pendingSourcesRef.current = null;
     setMessageSources((prev) => {
@@ -1224,7 +1233,7 @@ function ChatPanel({
       next.set(lastAssistant.id, sources);
       return next;
     });
-  }, [visibleMessages]);
+  }, [visibleMessages, messageSources]);
 
   // Auto-scroll to the bottom whenever the visible message list or streaming
   // text changes — keeps the latest tokens in view as they arrive.

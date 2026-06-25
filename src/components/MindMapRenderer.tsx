@@ -714,10 +714,8 @@ function MindMapGraph({
   );
 
   const containerClass =
-    variant === "fullscreen"
+    variant === "fullscreen" || variant === "expanded"
       ? "w-full h-full bg-ink overflow-hidden"
-      : variant === "expanded"
-      ? "w-full h-mindmap-expanded rounded-lg border border-edge bg-ink overflow-hidden"
       : "w-full h-mindmap-card rounded-lg border border-edge bg-ink overflow-hidden";
 
   const graph = (

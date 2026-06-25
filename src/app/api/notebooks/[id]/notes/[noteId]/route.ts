@@ -137,6 +137,21 @@ export async function POST(
           }
         }
 
+        // OpenRAG occasionally leaks tool-call JSON objects (e.g. {"search_query":
+        // "..."}) directly into the streamed content alongside the real text.
+        // For mindmap notes this breaks parseMindMap because the JSON prefix
+        // on the first line prevents the root "- Topic" from matching.
+        // Strip any {...} blobs before saving so the stored content is clean.
+        if (noteType === "mindmap") {
+          console.log("[mindmap] raw assembled START ---");
+          console.log(JSON.stringify(assembled));
+          console.log("[mindmap] raw assembled END ---");
+          assembled = assembled.replace(/\{[^}]*\}/g, "").trim();
+          console.log("[mindmap] cleaned assembled START ---");
+          console.log(JSON.stringify(assembled));
+          console.log("[mindmap] cleaned assembled END ---");
+        }
+
         // Persist the note to SQLite once streaming is complete.
         const now = Date.now();
         const noteId = uuid();

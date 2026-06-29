@@ -511,8 +511,12 @@ function SourcesPanel({
   onSelectionChange: (ids: Set<string>) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const urlInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // URL input mode: toggled by the "🔗 URL" button next to "+ Add source(s)".
+  const [addingUrl, setAddingUrl] = useState(false);
+  const [urlValue, setUrlValue] = useState("");
 
   // File types confirmed to work with Docling ingest. Used for the file
   // picker's accept attribute and to reject unsupported files before they
@@ -610,6 +614,31 @@ function SourcesPanel({
     }
   }
 
+  async function submitUrl() {
+    const url = urlValue.trim();
+    if (!url) return;
+    setError(null);
+    setUploading({ done: 0, total: 1 });
+    try {
+      const res = await fetch(`/api/notebooks/${notebookId}/documents/url`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? `request failed (${res.status})`);
+      }
+      setUrlValue("");
+      setAddingUrl(false);
+      onUploaded();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "URL ingest failed");
+    } finally {
+      setUploading(null);
+    }
+  }
+
   async function bulkDelete() {
     if (selected.size === 0) return;
     if (!confirm(`Delete ${selected.size} source${selected.size > 1 ? "s" : ""}? This removes their chunks from the index.`))
@@ -694,8 +723,8 @@ function SourcesPanel({
           </ModelPickerPopover>
         </div>
       )}
-      {/* Row 3: add source button */}
-      <div className="border-b border-edge px-3 py-2">
+      {/* Row 3: add source buttons + optional URL input */}
+      <div className="border-b border-edge px-3 py-2 space-y-2">
         <input
           ref={inputRef}
           type="file"
@@ -707,18 +736,62 @@ function SourcesPanel({
             if (files.length) upload(files);
           }}
         />
-        <button
-          onClick={() => inputRef.current?.click()}
-          disabled={!!uploading}
-          className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          {uploading && <Spinner size="sm" />}
-          {uploading
-            ? uploading.total > 1
-              ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
-              : "Uploading…"
-            : "+ Add source(s)"}
-        </button>
+        {/* Two-button row: file upload (main) + URL toggle (secondary) */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => inputRef.current?.click()}
+            disabled={!!uploading}
+            className="flex flex-1 items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {uploading && <Spinner size="sm" />}
+            {uploading
+              ? uploading.total > 1
+                ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
+                : "Uploading…"
+              : "+ Add source(s)"}
+          </button>
+          <button
+            onClick={() => {
+              setAddingUrl((v) => !v);
+              setError(null);
+              // Focus the URL input on next paint after it mounts.
+              if (!addingUrl) setTimeout(() => urlInputRef.current?.focus(), 0);
+            }}
+            disabled={!!uploading}
+            title="Add source from URL"
+            className={`flex items-center rounded-md border px-3 py-2 text-sm font-medium transition disabled:opacity-50 ${
+              addingUrl
+                ? "border-accent bg-accent/20 text-accent"
+                : "border-edge text-muted hover:border-accent hover:text-white"
+            }`}
+          >
+            URL
+          </button>
+        </div>
+
+        {/* Inline URL input — only visible when URL mode is active */}
+        {addingUrl && (
+          <form
+            onSubmit={(e) => { e.preventDefault(); submitUrl(); }}
+            className="flex gap-2"
+          >
+            <input
+              ref={urlInputRef}
+              type="url"
+              value={urlValue}
+              onChange={(e) => setUrlValue(e.target.value)}
+              placeholder="https://example.com/article"
+              className="flex-1 rounded-md border border-edge bg-panel px-2 py-1.5 text-sm text-white placeholder:text-muted focus:border-accent focus:outline-none"
+            />
+            <button
+              type="submit"
+              disabled={!urlValue.trim() || !!uploading}
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              Add
+            </button>
+          </form>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {documents.length === 0 ? (

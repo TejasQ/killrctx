@@ -65,6 +65,7 @@ export type Document = {
   notebook_id: string;
   filename: string;
   bytes: number;
+  mimetype: string | null;  // MIME type as reported at upload time (e.g. "image/png", "text/html")
   openrag_id: string | null; // OpenRAG task ID returned by /router/upload_ingest
   ingest_status: "indexing" | "ready" | "failed";
   ingest_error: string | null; // error message from OpenRAG if ingest_status = 'failed'
@@ -183,6 +184,26 @@ function getDb(): Database.Database {
     if (docCols.length > 0 && !docCols.some((c) => c.name === "ingest_error")) {
       conn.exec("ALTER TABLE documents ADD COLUMN ingest_error TEXT");
     }
+    if (docCols.length > 0 && !docCols.some((c) => c.name === "mimetype")) {
+      conn.exec("ALTER TABLE documents ADD COLUMN mimetype TEXT");
+    }
+    // Back-fill NULL mimetype rows from filename extension. Runs on every boot
+    // but is a no-op once all rows have a value. The URL route always wrote
+    // .html filenames; image uploads carry their own extension.
+    if (docCols.length > 0) {
+      conn.exec(`
+        UPDATE documents SET mimetype = 'text/html'
+          WHERE mimetype IS NULL AND filename LIKE '%.html';
+        UPDATE documents SET mimetype = 'image/png'
+          WHERE mimetype IS NULL AND filename LIKE '%.png';
+        UPDATE documents SET mimetype = 'image/jpeg'
+          WHERE mimetype IS NULL AND (filename LIKE '%.jpg' OR filename LIKE '%.jpeg');
+        UPDATE documents SET mimetype = 'image/webp'
+          WHERE mimetype IS NULL AND filename LIKE '%.webp';
+        UPDATE documents SET mimetype = 'image/tiff'
+          WHERE mimetype IS NULL AND filename LIKE '%.tiff';
+      `);
+    }
   } catch {
     // documents table doesn't exist yet — CREATE TABLE below includes the column.
   }
@@ -256,6 +277,7 @@ function getDb(): Database.Database {
       notebook_id TEXT NOT NULL,
       filename TEXT NOT NULL,
       bytes INTEGER NOT NULL,
+      mimetype TEXT,
       openrag_id TEXT,
       ingest_status TEXT NOT NULL DEFAULT 'ready',
       ingest_error TEXT,

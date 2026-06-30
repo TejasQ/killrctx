@@ -109,11 +109,11 @@ export async function POST(
   const docId = existingDoc?.id ?? uuid();
   if (existingDoc) {
     db.prepare(
-      "UPDATE documents SET bytes = ?, openrag_id = ?, ingest_status = 'indexing', ingest_error = NULL WHERE id = ?",
+      "UPDATE documents SET bytes = ?, mimetype = 'text/html', openrag_id = ?, ingest_status = 'indexing', ingest_error = NULL WHERE id = ?",
     ).run(htmlBytes.length, taskId || null, docId);
   } else {
     db.prepare(
-      "INSERT INTO documents (id, notebook_id, filename, bytes, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, 'indexing', ?)",
+      "INSERT INTO documents (id, notebook_id, filename, bytes, mimetype, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, 'text/html', ?, 'indexing', ?)",
     ).run(docId, id, filename, htmlBytes.length, taskId || null, Date.now());
   }
 

@@ -92,15 +92,16 @@ export async function POST(
 
   // Save the pointer row. If the file was already in the notebook (overwrite),
   // update in place so the row id and created_at stay stable for the UI.
+  const mimetype = file.type || "application/octet-stream";
   const docId = existingDoc?.id ?? uuid();
   if (existingDoc) {
     db.prepare(
-      "UPDATE documents SET bytes = ?, openrag_id = ?, ingest_status = 'indexing', ingest_error = NULL WHERE id = ?",
-    ).run(bytes.length, taskId || null, docId);
+      "UPDATE documents SET bytes = ?, mimetype = ?, openrag_id = ?, ingest_status = 'indexing', ingest_error = NULL WHERE id = ?",
+    ).run(bytes.length, mimetype, taskId || null, docId);
   } else {
     db.prepare(
-      "INSERT INTO documents (id, notebook_id, filename, bytes, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, 'indexing', ?)",
-    ).run(docId, id, file.name, bytes.length, taskId || null, Date.now());
+      "INSERT INTO documents (id, notebook_id, filename, bytes, mimetype, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'indexing', ?)",
+    ).run(docId, id, file.name, bytes.length, mimetype, taskId || null, Date.now());
   }
 
   // Schedule a debounced filter sync. When multiple files upload in quick

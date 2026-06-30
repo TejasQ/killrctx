@@ -37,6 +37,7 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
+import { Globe, File, FileImage } from "lucide-react";
 import Spinner from "@/components/Spinner";
 // ReactFlow uses browser-only APIs (ResizeObserver, window). Dynamic import with
 // ssr:false prevents the component from being pre-rendered on the server, which
@@ -52,7 +53,7 @@ import type { MindMapLink } from "@/lib/db";
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
 type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null };
-type Document = { id: string; filename: string; bytes: number; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
+type Document = { id: string; filename: string; bytes: number; mimetype: string | null; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string; sources_json: string | null };
 type Note = {
@@ -809,7 +810,16 @@ function SourcesPanel({
           </p>
         ) : (
           <ul className="space-y-2">
-            {documents.map((d) => (
+            {documents.map((d) => {
+              // Pick icon from the mimetype stored at ingest time — same icons
+              // used in the filter picker so the visual language is consistent.
+              // mimetype is null for rows ingested before this column existed;
+              // those fall through to File.
+              const DocIcon =
+                d.mimetype?.startsWith("image/") ? FileImage :
+                d.mimetype === "text/html"        ? Globe      :
+                                                    File;
+              return (
               <li
                 key={d.id}
                 className="group flex items-center gap-2 rounded-md border border-edge px-3 py-2 text-sm"
@@ -825,6 +835,7 @@ function SourcesPanel({
                     checked:border-accent checked:bg-accent
                     ${selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                 />
+                <DocIcon className="h-3.5 w-3.5 flex-shrink-0 text-muted" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate">{d.filename}</div>
                   <div className="flex items-center gap-1.5 text-xs text-muted">
@@ -850,7 +861,8 @@ function SourcesPanel({
                   </div>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
         {error && (

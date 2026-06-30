@@ -34,6 +34,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
+  ControlButton,
   Controls,
   Handle,
   Position,
@@ -70,11 +71,22 @@ function MindMapNode({ data }: NodeProps) {
     transition: `opacity ${ANIM_MS}ms ease, transform ${ANIM_MS}ms ease`,
     ...data.animStyle,
   };
+  // Handle positions depend on layout direction so edges connect on the
+  // correct sides. Direction is passed through node data by buildGraph.
+  const isVertical = data.direction === "vertical";
   return (
     <div style={style}>
-      <Handle type="target" position={Position.Left}  style={{ visibility: "hidden" }} />
+      <Handle
+        type="target"
+        position={isVertical ? Position.Top : Position.Left}
+        style={{ visibility: "hidden" }}
+      />
       {data.label}
-      <Handle type="source" position={Position.Right} style={{ visibility: "hidden" }} />
+      <Handle
+        type="source"
+        position={isVertical ? Position.Bottom : Position.Right}
+        style={{ visibility: "hidden" }}
+      />
     </div>
   );
 }
@@ -115,9 +127,13 @@ function ChevronNode({ data }: NodeProps) {
 const NODE_TYPES = { mindmap: MindMapNode, chevron: ChevronNode };
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-const NODE_X_STEP     = 300; // horizontal gap between depth levels
-const NODE_Y_STEP     = 68;  // vertical gap between sibling nodes
-const CHEVRON_OFFSET  = 8;   // px gap between node right edge and chevron
+// Horizontal layout: depth grows right (X), siblings spread down (Y).
+// Vertical layout:   depth grows down (Y), siblings spread right (X).
+const NODE_X_STEP     = 300; // horizontal: gap between depth levels
+const NODE_Y_STEP     = 68;  // horizontal: gap between sibling nodes
+const NODE_Y_STEP_V   = 120; // vertical:   gap between depth levels (more room for labels)
+const NODE_X_STEP_V   = 220; // vertical:   gap between sibling nodes
+const CHEVRON_OFFSET  = 8;   // px gap between node edge and its chevron
 
 // Per-depth node dimensions. Index = depth level; last entry applies to all
 // deeper levels.
@@ -337,12 +353,17 @@ function nodeLabel(tn: TreeNode, linkedCount: number): React.ReactNode {
 // Chevron nodes are emitted as separate ReactFlow nodes for every parent node
 // (nodes with children) — positioned OUTSIDE the right edge of their parent box.
 // This keeps collapse/expand clicks separate from node-body inquiry clicks.
+// ── buildGraph ────────────────────────────────────────────────────────────────
+// Converts the tree into ReactFlow nodes + edges.
+// direction: "horizontal" = root left, depth grows right (default)
+//            "vertical"   = root top, depth grows down
 function buildGraph(
   root:          TreeNode,
   collapsedIds:  Set<string>,
   onToggle:      (id: string) => void,
   onAsk:         (id: string, label: string) => void,
   linksByKey:    Map<string, string[]>,
+  direction:     "horizontal" | "vertical" = "horizontal",
 ): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
@@ -388,39 +409,51 @@ function buildGraph(
     const linkedCount = tn.isSource ? 0 : (linksByKey.get(key)?.length ?? 0);
     const label       = nodeLabel(tn, linkedCount);
 
+    // Node position: horizontal = depth→X, siblingSpread→Y
+    //                vertical   = depth→Y, siblingSpread→X
+    const pos = direction === "vertical"
+      ? { x: yMap[tn.id] * (NODE_X_STEP_V / NODE_Y_STEP), y: depth * NODE_Y_STEP_V }
+      : { x: depth * NODE_X_STEP,                          y: yMap[tn.id] };
+
     // Node body — clicking fires inquiry (onAsk), not collapse.
     nodes.push({
       id:       tn.id,
       type:     "mindmap",
-      position: { x: depth * NODE_X_STEP, y: yMap[tn.id] },
+      position: pos,
       // All non-source nodes are selectable so onNodeClick fires for leaves too.
       selectable: !tn.isSource,
       data: {
         label,
         style: ns,
+        direction,
         // onClick is called by MindMapGraph's handleNodeClick.
         // Pass id so handleAskRef can resolve ancestor labels from the tree root.
         ...(!tn.isSource && { onClick: () => onAsk(tn.id, tn.label) }),
       },
     });
 
-    // Chevron — emitted as a sibling node outside the right edge of its parent.
-    // Only for nodes that have children.
+    // Chevron — emitted as a sibling node just outside the parent's trailing edge.
+    // Horizontal: to the right. Vertical: below.
     if (hasKids) {
       const collapsed   = collapsedIds.has(tn.id);
       const chevronId   = `chevron-${tn.id}`;
       const chevronSize = 20;
+      const chevronPos  = direction === "vertical"
+        ? {
+            x: pos.x + (dims.width - chevronSize) / 2,
+            y: pos.y + dims.height + CHEVRON_OFFSET,
+          }
+        : {
+            x: pos.x + dims.width + CHEVRON_OFFSET,
+            y: pos.y + (dims.height - chevronSize) / 2,
+          };
       nodes.push({
         id:         chevronId,
         type:       "chevron",
         selectable: true,
-        // Position: centred vertically on the parent, just past its right edge.
-        position: {
-          x: depth * NODE_X_STEP + dims.width + CHEVRON_OFFSET,
-          y: yMap[tn.id] + (dims.height - chevronSize) / 2,
-        },
+        position:   chevronPos,
         data: {
-          label:   collapsed ? "›" : "‹",
+          label:   collapsed ? (direction === "vertical" ? "∨" : "›") : (direction === "vertical" ? "∧" : "‹"),
           onClick: () => onToggle(tn.id),
         },
       });
@@ -512,6 +545,7 @@ function MindMapGraph({
 }) {
   const { setNodes, setEdges, setCenter, fitView } = useReactFlow();
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [direction, setDirection] = useState<"horizontal" | "vertical">("horizontal");
   // animating: true while a collapse-out animation is in flight. Blocks
   // re-entrant toggles so two animations don't stomp each other.
   const animating = useRef(false);
@@ -530,8 +564,9 @@ function MindMapGraph({
       (id) => handleToggleRef.current(id),
       (id, label) => handleAskRef.current(id, label),
       linksByKey,
+      direction,
     ),
-    [tree, collapsedIds, linksByKey],
+    [tree, collapsedIds, linksByKey, direction],
   );
 
   // Sync ReactFlow internal state on initial mount and whenever baseNodes
@@ -585,6 +620,7 @@ function MindMapGraph({
           (nid) => handleToggleRef.current(nid),
           (id, label) => handleAskRef.current(id, label),
           linksByKey,
+          direction,
         );
         const nextPosById = new Map(nextNodes.map((n) => [n.id, n.position]));
 
@@ -657,6 +693,7 @@ function MindMapGraph({
         (nid) => handleToggleRef.current(nid),
         (id, label) => handleAskRef.current(id, label),
         linksByKey,
+        direction,
       );
 
       let newNodeIds: string[] = [];
@@ -692,7 +729,7 @@ function MindMapGraph({
         }, ANIM_MS);
       });
     }
-  }, [collapsedIds, tree, linksByKey, setNodes, setEdges]);
+  }, [collapsedIds, direction, tree, linksByKey, setNodes, setEdges]);
 
   // Keep refs in sync so buildGraph closures always call the latest handlers.
   handleToggleRef.current = handleToggle;
@@ -735,12 +772,26 @@ function MindMapGraph({
       <Background color="#222226" gap={28} size={1} />
       {/* Controls anchored bottom-right. showInteractive hides the lock toggle;
           showFitView hides the fullscreen button since sizing is at NoteCard level.
-          Visual styling is in globals.css under .react-flow__controls. */}
+          Visual styling is in globals.css under .react-flow__controls.
+          The custom ControlButton toggles horizontal ↔ vertical layout. */}
       <Controls
         showInteractive={false}
         showFitView={false}
         position="bottom-right"
-      />
+      >
+        <ControlButton
+          onClick={() => setDirection((d) => d === "horizontal" ? "vertical" : "horizontal")}
+          title={direction === "horizontal" ? "Switch to vertical layout" : "Switch to horizontal layout"}
+        >
+          {/* Rotate icon — two arrows showing axis swap */}
+          <svg viewBox="0 0 16 16" fill="currentColor">
+            {direction === "horizontal"
+              ? /* top-to-bottom arrow */ <path d="M8 1v10.5M4 8l4 4 4-4M2 13h12" strokeWidth="1.5" stroke="currentColor" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              : /* left-to-right arrow */ <path d="M1 8h10.5M8 4l4 4-4 4M13 2v12" strokeWidth="1.5" stroke="currentColor" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+            }
+          </svg>
+        </ControlButton>
+      </Controls>
     </ReactFlow>
   );
 

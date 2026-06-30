@@ -103,11 +103,18 @@ export default function NotebookPage({
   // Drag-to-resize Sources panel. Called from the handle inside SourcesPanel
   // on mousedown; we attach mousemove/mouseup to the window so the drag stays
   // live even if the cursor moves outside the handle.
+  //
+  // Clamp against the actual viewport width, not just the drag delta, so once
+  // the layout runs out of room the left panel simply stops growing instead of
+  // forcing the whole three-column grid wider than the screen.
   function startSourcesResize(startX: number) {
     const startWidth = sourcesWidth;
     setSourcesDragging(true);
     function onMove(e: MouseEvent) {
-      const next = Math.max(180, startWidth + e.clientX - startX);
+      const rightPanelWidth = studioCollapsed ? 48 : studioExpanded ? Math.max(studioWidth, 680) : studioWidth;
+      const MIN_CHAT = 320;
+      const maxSources = window.innerWidth - rightPanelWidth - MIN_CHAT;
+      const next = Math.min(maxSources, Math.max(180, startWidth + e.clientX - startX));
       setSourcesWidth(next);
     }
     function onUp() {
@@ -122,10 +129,9 @@ export default function NotebookPage({
   // Drag-to-resize Studio panel. Handle is on the left edge; dragging left
   // widens the panel so the delta is subtracted rather than added.
   //
-  // We also clamp the max so the Studio panel can never push the Chat panel
-  // (minimum 320px) or the Sources panel off-screen. Once the other panels
-  // have hit their minimums, the Studio size simply locks rather than
-  // overflowing the viewport.
+  // Clamp against the actual viewport width so the right panel stops growing as
+  // soon as the middle chat column hits its minimum width. That keeps the grid
+  // from pushing off the right side of the screen during an aggressive drag.
   function startStudioResize(startX: number) {
     const startWidth = studioWidth;
     setStudioDragging(true);
@@ -270,7 +276,7 @@ export default function NotebookPage({
 
   return (
     <>
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen w-screen overflow-hidden flex-col">
       <header className="flex items-center justify-between border-b border-edge px-4 py-3">
         <div className="flex items-center gap-3">
           <Link href="/" className="text-sm text-muted hover:text-white">
@@ -329,12 +335,13 @@ export default function NotebookPage({
       </header>
 
       <div
+        id="notebook-three-panel-grid"
         style={{
-          gridTemplateColumns: `${sourcesCollapsed ? "48px" : `${sourcesWidth}px`} 1fr ${studioCollapsed ? "48px" : studioExpanded ? `${Math.max(studioWidth, 680)}px` : `${studioWidth}px`}`,
+          gridTemplateColumns: `${sourcesCollapsed ? "48px" : `${sourcesWidth}px`} minmax(320px, 1fr) ${studioCollapsed ? "48px" : studioExpanded ? `${Math.max(studioWidth, 680)}px` : `${studioWidth}px`}`,
           // Only animate during collapse/expand, not while drag-resizing.
           transition: sourcesDragging || studioDragging ? "none" : "grid-template-columns 200ms ease",
         }}
-        className="grid min-h-0 flex-1 overflow-hidden"
+        className="grid min-h-0 min-w-0 flex-1 overflow-hidden"
       >
         <SourcesPanel
           notebookId={id}

@@ -733,7 +733,14 @@ function MindMapGraph({
       style={{ background: "#0b0b0c" }}
     >
       <Background color="#222226" gap={28} size={1} />
-      <Controls showInteractive={false} />
+      {/* Controls anchored bottom-right. showInteractive hides the lock toggle;
+          showFitView hides the fullscreen button since sizing is at NoteCard level.
+          Visual styling is in globals.css under .react-flow__controls. */}
+      <Controls
+        showInteractive={false}
+        showFitView={false}
+        position="bottom-right"
+      />
     </ReactFlow>
   );
 

@@ -12,3 +12,37 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #2a2a2f; border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ReactFlow Controls — override the default white-on-white buttons to match
+   the app's dark panel style. The container bg/border is set inline in
+   MindMapRenderer; here we target individual button states.
+   The !important flags are needed to beat the specificity of the bundled
+   reactflow/dist/style.css which is imported in the same component. */
+.react-flow__controls {
+  background:   #141416 !important;
+  border:       1px solid #222226 !important;
+  border-radius: 6px !important;
+  box-shadow:   none !important;
+}
+.react-flow__controls-button {
+  background:    #141416 !important;
+  border:        none !important;
+  border-bottom: 1px solid #222226 !important;
+  color:         #8a8a92 !important;
+  fill:          #8a8a92 !important;
+  width:         28px !important;
+  height:        28px !important;
+}
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+.react-flow__controls-button:hover {
+  background: #222226 !important;
+  color:      #e6e6ea !important;
+  fill:       #e6e6ea !important;
+}
+.react-flow__controls-button svg {
+  fill:       inherit !important;
+  max-width:  12px;
+  max-height: 12px;
+}

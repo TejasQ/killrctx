@@ -580,6 +580,14 @@ function MindMapGraph({
     setEdges(baseEdges);
   }, [baseNodes, baseEdges, setNodes, setEdges]);
 
+  // Re-fit the viewport whenever the layout direction changes so the
+  // re-positioned graph doesn't disappear off-screen.
+  useEffect(() => {
+    // requestAnimationFrame defers until after ReactFlow has applied the new
+    // node positions from the direction-driven useMemo above.
+    requestAnimationFrame(() => fitView({ duration: ANIM_MS, padding: 0.2 }));
+  }, [direction, fitView]);
+
   const handleToggle = useCallback((id: string) => {
     if (animating.current) return;
 

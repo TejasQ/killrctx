@@ -531,6 +531,9 @@ function SourcesPanel({
   // Second hidden input for folder picking. webkitdirectory and multiple can't
   // coexist on one element, so we use two inputs driven by one split button.
   const folderInputRef = useRef<HTMLInputElement>(null);
+  // Shared hidden input for per-row retry. accept is set imperatively to the
+  // failed file's extension just before .click() so the OS picker is scoped.
+  const retryInputRef = useRef<HTMLInputElement>(null);
   const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -801,6 +804,18 @@ function SourcesPanel({
             if (files.length) upload(files);
           }}
         />
+        {/* Shared retry input — accept is set per-click to the failed file's
+            extension before .click() is called, scoping the OS picker. */}
+        <input
+          ref={retryInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (retryInputRef.current) retryInputRef.current.value = "";
+            if (file) upload([file]);
+          }}
+        />
         {/* Two-button row: file upload (main) + URL toggle (secondary) */}
         <div className="flex gap-2">
           {/* Split button: left half = file picker, right half = folder picker dropdown.
@@ -944,6 +959,22 @@ function SourcesPanel({
                         >
                           ✕ Failed
                         </span>
+                        <button
+                          disabled={!!uploading}
+                          onClick={() => {
+                            const ext = "." + d.filename.split(".").pop()?.toLowerCase();
+                            if (retryInputRef.current) {
+                              // Scope the OS picker to this file's extension so the
+                              // user can't accidentally pick a different file type.
+                              retryInputRef.current.accept = SUPPORTED_EXTENSIONS.has(ext) ? ext : ACCEPT;
+                              retryInputRef.current.click();
+                            }
+                          }}
+                          className="text-xs text-accent hover:underline disabled:opacity-50"
+                          title="Re-upload this file to retry ingest"
+                        >
+                          ↺ Retry
+                        </button>
                       </>
                     )}
                   </div>

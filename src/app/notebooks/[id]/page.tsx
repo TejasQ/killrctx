@@ -528,6 +528,10 @@ function SourcesPanel({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
+  // Second hidden input for folder picking. webkitdirectory and multiple can't
+  // coexist on one element, so we use two inputs driven by one split button.
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   // URL input mode: toggled by the "🔗 URL" button next to "+ Add source(s)".
@@ -564,6 +568,23 @@ function SourcesPanel({
   function askOverwrite(duplicates: File[]): Promise<File[]> {
     return new Promise((resolve) => setOverwritePrompt({ duplicates, resolve }));
   }
+
+  // Close the folder dropdown when the user clicks anywhere outside the split button.
+  // The listener is only attached while the menu is open to keep event overhead minimal.
+  useEffect(() => {
+    if (!folderMenuOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      const target = e.target as Node;
+      // The split-button wrapper has data-folder-menu on it; if the click
+      // was inside that wrapper, leave the menu alone — the button's own
+      // onClick will handle it.
+      const wrapper = document.querySelector("[data-folder-menu]");
+      if (wrapper && wrapper.contains(target)) return;
+      setFolderMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [folderMenuOpen]);
 
   // Upload files sequentially. The API route accepts one `file` per
   // request, so we loop here rather than batching multipart on the server.
@@ -752,20 +773,80 @@ function SourcesPanel({
             if (files.length) upload(files);
           }}
         />
+        {/* webkitdirectory makes the OS picker show folders instead of files.
+            The browser returns every file inside the chosen folder at all
+            depths as a flat FileList — we filter to SUPPORTED_EXTENSIONS. */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          // @ts-expect-error — webkitdirectory is not in React's InputHTMLAttributes
+          webkitdirectory=""
+          className="hidden"
+          onChange={(e) => {
+            const raw = Array.from(e.target.files ?? []);
+            // webkitdirectory sets f.name to the relative path
+            // (e.g. "heroes/Raven.pdf"). The API route strips the path to just
+            // the basename before passing it to OpenRAG, so we only need to
+            // filter here using the basename.
+            const files = raw.filter((f) => {
+              const basename = f.name.split("/").pop() ?? f.name;
+              const ext = "." + basename.split(".").pop()?.toLowerCase();
+              return SUPPORTED_EXTENSIONS.has(ext);
+            });
+            if (folderInputRef.current) folderInputRef.current.value = "";
+            if (raw.length > 0 && files.length === 0) {
+              setError("No supported files found in the selected folder.");
+              return;
+            }
+            if (files.length) upload(files);
+          }}
+        />
         {/* Two-button row: file upload (main) + URL toggle (secondary) */}
         <div className="flex gap-2">
-          <button
-            onClick={() => inputRef.current?.click()}
-            disabled={!!uploading}
-            className="flex flex-1 items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {uploading && <Spinner size="sm" />}
-            {uploading
-              ? uploading.total > 1
-                ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
-                : "Uploading…"
-              : "+ Add source(s)"}
-          </button>
+          {/* Split button: left half = file picker, right half = folder picker dropdown.
+              Two halves share rounded corners and accent colour but are separate
+              <button> elements so each has its own click target. */}
+          <div className="relative flex flex-1" data-folder-menu>
+            {/* Left half — opens the multi-file picker (unchanged behaviour) */}
+            <button
+              onClick={() => inputRef.current?.click()}
+              disabled={!!uploading}
+              className="flex flex-1 items-center justify-center gap-2 rounded-l-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {uploading && <Spinner size="sm" />}
+              {uploading
+                ? uploading.total > 1
+                  ? `Uploading ${uploading.done + 1} / ${uploading.total}…`
+                  : "Uploading…"
+                : "+ Add source(s)"}
+            </button>
+            {/* Thin divider between the two halves */}
+            <span className="w-px bg-white/20 self-stretch" />
+            {/* Right half — opens the folder-picker dropdown */}
+            <button
+              onClick={() => setFolderMenuOpen((v) => !v)}
+              disabled={!!uploading}
+              title="Add a folder"
+              className="flex items-center rounded-r-md bg-accent px-2 py-2 text-sm text-white disabled:opacity-50 hover:bg-accent/80"
+            >
+              ▾
+            </button>
+            {/* Dropdown — rendered when folderMenuOpen is true.
+                Outside-click dismissal is handled by a useEffect below. */}
+            {folderMenuOpen && (
+              <div className="absolute left-0 top-full z-20 mt-1 w-full rounded-md border border-edge bg-panel shadow-lg">
+                <button
+                  onClick={() => {
+                    setFolderMenuOpen(false);
+                    folderInputRef.current?.click();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white hover:bg-white/10"
+                >
+                  📁 Add folder
+                </button>
+              </div>
+            )}
+          </div>
           <button
             onClick={() => {
               setAddingUrl((v) => !v);

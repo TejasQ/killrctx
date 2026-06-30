@@ -63,12 +63,17 @@ export async function POST(
     return NextResponse.json({ error: "file missing" }, { status: 400 });
   }
 
+  // webkitdirectory picks send the relative path as the filename
+  // (e.g. "heroes/Raven.pdf"). OpenRAG/Langflow rejects filenames containing
+  // slashes, so we strip to the basename here before touching anything else.
+  const filename = file.name.split("/").pop() ?? file.name;
+
   // If this filename already exists in the notebook, we'll overwrite the
   // existing row after re-ingesting. OpenRAG handles re-ingest by filename
   // natively — no need to delete first.
   const existingDoc = db
     .prepare("SELECT id FROM documents WHERE notebook_id = ? AND filename = ?")
-    .get(id, file.name) as { id: string } | undefined;
+    .get(id, filename) as { id: string } | undefined;
 
   // arrayBuffer() loads the whole file into memory — fine for ≤ a few MB
   // (typical PDFs/markdown). For multi-100MB uploads you'd switch to a
@@ -78,7 +83,7 @@ export async function POST(
   let taskId: string;
   try {
     const r = await ingestDocument({
-      filename: file.name,
+      filename,
       bytes,
       contentType: file.type || "application/octet-stream",
     });
@@ -101,7 +106,7 @@ export async function POST(
   } else {
     db.prepare(
       "INSERT INTO documents (id, notebook_id, filename, bytes, mimetype, openrag_id, ingest_status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'indexing', ?)",
-    ).run(docId, id, file.name, bytes.length, mimetype, taskId || null, Date.now());
+    ).run(docId, id, filename, bytes.length, mimetype, taskId || null, Date.now());
   }
 
   // Schedule a debounced filter sync. When multiple files upload in quick
@@ -124,6 +129,6 @@ export async function POST(
   }
 
   return NextResponse.json({
-    document: { id: docId, filename: file.name, bytes: bytes.length },
+    document: { id: docId, filename, bytes: bytes.length },
   });
 }

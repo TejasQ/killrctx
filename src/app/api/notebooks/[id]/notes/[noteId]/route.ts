@@ -44,8 +44,16 @@ const DEFAULT_TITLES: Record<NoteType, (date: string) => string> = {
 // Each note type has a dedicated prompt. The optional `topic` narrows focus.
 const NOTE_PROMPTS: Record<NoteType, string> = {
   summary:
-    "Write a concise prose summary of the key information in the sources. " +
-    "Focus on the most important facts, themes, and conclusions.",
+    "Write a rich, well-structured summary of the key information in the sources.\n\n" +
+    "Formatting rules (follow them exactly):\n" +
+    "- Begin with a single # Title that names the subject.\n" +
+    "- Use ## headings for major sections (e.g. Overview, Key Details, Agenda, Highlights).\n" +
+    "- Use **bold labels** (e.g. **Date:**, **Location:**, **Hosted by:**) for concise metadata — put each on its own line.\n" +
+    "- Use a blockquote (>) for any descriptive paragraph or abstract.\n" +
+    "- When the source contains a schedule, list, or comparison, render it as a markdown table.\n" +
+    "- Use bullet lists for sets of key facts, takeaways, or action items.\n" +
+    "- Use **bold** for the most important terms or names inline.\n" +
+    "- Do not produce a wall of prose. Every section should be visually distinct.",
   mindmap:
     "Create a mind map of the key concepts in the sources.\n" +
     "Output ONLY a nested markdown list in exactly this format — nothing else:\n" +

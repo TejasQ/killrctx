@@ -1097,9 +1097,9 @@ const markdownComponents: Components = {
     <td className="border-r border-edge px-3 py-2 last:border-r-0">{children}</td>
   ),
   p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-  h1: ({ children }) => <h1 className="mb-2 text-base font-bold">{children}</h1>,
-  h2: ({ children }) => <h2 className="mb-2 text-sm font-bold">{children}</h2>,
-  h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
+  h1: ({ children }) => <h1 className="mb-3 mt-1 text-base font-bold text-white">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-4 border-b border-edge pb-1 text-sm font-bold text-white first:mt-0">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1 mt-3 text-sm font-semibold text-white/90">{children}</h3>,
   ul: ({ children }) => <ul className="mb-2 list-disc pl-5 space-y-0.5">{children}</ul>,
   ol: ({ children }) => <ol className="mb-2 list-decimal pl-5 space-y-0.5">{children}</ol>,
   li: ({ children }) => <li>{children}</li>,
@@ -1118,7 +1118,9 @@ const markdownComponents: Components = {
     <pre className="mb-2 overflow-x-auto rounded border border-edge">{children}</pre>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="mb-2 border-l-2 border-accent pl-3 text-muted">{children}</blockquote>
+    <blockquote className="mb-3 border-l-[3px] border-accent/60 bg-white/[0.03] px-3 py-2 rounded-r text-zinc-300 italic">
+      {children}
+    </blockquote>
   ),
   strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,

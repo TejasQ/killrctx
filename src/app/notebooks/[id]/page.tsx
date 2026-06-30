@@ -120,11 +120,19 @@ export default function NotebookPage({
 
   // Drag-to-resize Studio panel. Handle is on the left edge; dragging left
   // widens the panel so the delta is subtracted rather than added.
+  //
+  // We also clamp the max so the Studio panel can never push the Chat panel
+  // (minimum 320px) or the Sources panel off-screen. Once the other panels
+  // have hit their minimums, the Studio size simply locks rather than
+  // overflowing the viewport.
   function startStudioResize(startX: number) {
     const startWidth = studioWidth;
     setStudioDragging(true);
     function onMove(e: MouseEvent) {
-      const next = Math.max(280, startWidth - (e.clientX - startX));
+      const currentSourcesWidth = sourcesCollapsed ? 48 : sourcesWidth;
+      const MIN_CHAT = 320;
+      const maxStudio = window.innerWidth - currentSourcesWidth - MIN_CHAT;
+      const next = Math.min(maxStudio, Math.max(280, startWidth - (e.clientX - startX)));
       setStudioWidth(next);
     }
     function onUp() {

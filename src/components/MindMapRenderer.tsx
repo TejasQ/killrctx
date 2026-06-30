@@ -580,13 +580,27 @@ function MindMapGraph({
     setEdges(baseEdges);
   }, [baseNodes, baseEdges, setNodes, setEdges]);
 
-  // Re-fit the viewport whenever the layout direction changes so the
-  // re-positioned graph doesn't disappear off-screen.
+  // Center on the root node whenever the layout direction changes.
+  // We use setCenter rather than fitView so the viewport snaps to the root
+  // regardless of how large the rest of the graph is.
+  //
+  // Why setTimeout(ANIM_MS) instead of requestAnimationFrame?
+  // Direction change → useMemo recomputes baseNodes → the sync useEffect above
+  // calls setNodes → ReactFlow renders new positions. That chain takes at least
+  // one full render cycle. requestAnimationFrame fires too early (before setNodes
+  // has painted). Waiting ANIM_MS guarantees positions are committed.
   useEffect(() => {
-    // requestAnimationFrame defers until after ReactFlow has applied the new
-    // node positions from the direction-driven useMemo above.
-    requestAnimationFrame(() => fitView({ duration: ANIM_MS, padding: 0.2 }));
-  }, [direction, fitView]);
+    const rootNode = baseNodes.find((n) => n.id === tree.id);
+    if (!rootNode) return;
+    const timer = setTimeout(() => {
+      setCenter(
+        rootNode.position.x + (rootNode.width  ?? 0) / 2,
+        rootNode.position.y + (rootNode.height ?? 0) / 2,
+        { duration: ANIM_MS, zoom: 1 },
+      );
+    }, ANIM_MS);
+    return () => clearTimeout(timer);
+  }, [direction]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleToggle = useCallback((id: string) => {
     if (animating.current) return;

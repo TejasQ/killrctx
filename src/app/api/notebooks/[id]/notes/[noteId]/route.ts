@@ -26,8 +26,9 @@
 
 import { NextRequest } from "next/server";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
+import db, { Notebook, Note, Conversation, buildQueryConfig } from "@/lib/db";
 import { chatStream, deleteConversation } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -119,7 +120,10 @@ export async function POST(
     return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
   }
 
-  const qc = buildQueryConfig(notebook, selectedFilenames);
+  const isWorkbench = notebook.rag_backend === "workbench";
+  const qc = !isWorkbench
+    ? buildQueryConfig(notebook, selectedFilenames)
+    : { filterId: null, sourcePaths: null, limit: null, scoreThreshold: null };
   const base = NOTE_PROMPTS[noteType];
   const prompt = topic ? `Focus specifically on: ${topic}.\n\n${base}` : base;
 
@@ -130,18 +134,39 @@ export async function POST(
       }
 
       try {
-        // Notes use limit:12 for broader retrieval coverage over the full doc set.
-        const events = await chatStream({ prompt, ...qc, limit: qc.limit ?? 12 });
-
         let assembled = "";
         let responseId = "";
 
-        for await (const event of events) {
-          if (event.type === "content") {
-            assembled += event.delta;
-            send({ type: "delta", text: event.delta });
-          } else if (event.type === "done") {
-            responseId = event.chatId ?? "";
+        if (isWorkbench) {
+          // ── Workbench streaming path ──
+          const conv = db
+            .prepare("SELECT * FROM conversations WHERE notebook_id = ? ORDER BY created_at ASC LIMIT 1")
+            .get(id) as Conversation | undefined;
+          const rag = getBackend("workbench");
+          const events = rag.chatStream({
+            prompt,
+            notebook,
+            workbenchAgentId: conv?.workbench_agent_id,
+            workbenchConversationId: conv?.workbench_conversation_id,
+          });
+          for await (const event of events) {
+            if (event.type === "token") {
+              assembled += event.delta;
+              send({ type: "delta", text: event.delta });
+            } else if (event.type === "done") {
+              responseId = event.responseId;
+            }
+          }
+        } else {
+          // ── OpenRAG streaming path ──
+          const events = await chatStream({ prompt, ...qc, limit: qc.limit ?? 12 });
+          for await (const event of events) {
+            if (event.type === "content") {
+              assembled += event.delta;
+              send({ type: "delta", text: event.delta });
+            } else if (event.type === "done") {
+              responseId = event.chatId ?? "";
+            }
           }
         }
 

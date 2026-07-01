@@ -32,6 +32,15 @@ import { join } from "node:path";
 import { chat } from "./openrag";
 import { tts, HOST_VOICE, GUEST_VOICE } from "./elevenlabs";
 
+/** A chat function signature matching what draftScript needs. */
+export type ChatFn = (args: {
+  prompt: string;
+  filterId?: string | null;
+  sourcePaths?: string[] | null;
+  limit?: number | null;
+  scoreThreshold?: number | null;
+}) => Promise<{ response: string; responseId: string }>;
+
 export type Turn = { speaker: "HOST" | "GUEST"; text: string };
 
 // The system-style prompt we hand to OpenRAG. Constraints (especially the
@@ -84,11 +93,14 @@ export async function draftScript(args: {
   sourcePaths?: string[] | null;
   limit?: number | null;
   scoreThreshold?: number | null;
+  /** Optional override chat function — used for Workbench-backed notebooks. */
+  chatFn?: ChatFn;
 }): Promise<{ script: string; responseId: string }> {
   const prompt = args.topic
     ? `Topic focus: ${args.topic}\n\n${SCRIPT_PROMPT}`
     : SCRIPT_PROMPT;
-  const { response, responseId } = await chat({
+  const doChat = args.chatFn ?? chat;
+  const { response, responseId } = await doChat({
     prompt,
     filterId: args.filterId,
     sourcePaths: args.sourcePaths,
@@ -96,7 +108,7 @@ export async function draftScript(args: {
     scoreThreshold: args.scoreThreshold,
   });
   const script = response.trim();
-  if (!script) throw new Error("OpenRAG returned an empty script");
+  if (!script) throw new Error("Backend returned an empty script");
   return { script, responseId };
 }
 

@@ -29,8 +29,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
-import { draftScript, parseScript, synthesizeAndStitch } from "@/lib/podcast";
+import db, { Notebook, Note, Conversation, buildQueryConfig } from "@/lib/db";
+import { draftScript, parseScript, synthesizeAndStitch, type ChatFn } from "@/lib/podcast";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -68,7 +69,27 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const qc = buildQueryConfig(notebook, selectedFilenames);
+  const qc = notebook.rag_backend !== "workbench"
+    ? buildQueryConfig(notebook, selectedFilenames)
+    : { filterId: null, sourcePaths: null, limit: null, scoreThreshold: null };
+
+  // For Workbench notebooks, build a chatFn that routes through the backend.
+  let chatFn: ChatFn | undefined;
+  if (notebook.rag_backend === "workbench") {
+    // Use the first conversation's agent + workbench conversation ID for scripting.
+    const conv = db
+      .prepare("SELECT * FROM conversations WHERE notebook_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(id) as Conversation | undefined;
+    const rag = getBackend("workbench");
+    chatFn = async (args) => {
+      return rag.chat({
+        prompt: args.prompt,
+        notebook,
+        workbenchAgentId: conv?.workbench_agent_id,
+        workbenchConversationId: conv?.workbench_conversation_id,
+      });
+    };
+  }
 
   const podcastId = uuid();
   const now = Date.now();
@@ -89,7 +110,7 @@ export async function POST(
   void (async () => {
     try {
       // === Step 1: draft script ==============================================
-      const { script, responseId } = await draftScript({ topic, ...qc });
+      const { script, responseId } = await draftScript({ topic, ...qc, chatFn });
       // Save response_id so the DELETE handler can clean up the OpenRAG thread,
       // same as every other note type.
       db.prepare(

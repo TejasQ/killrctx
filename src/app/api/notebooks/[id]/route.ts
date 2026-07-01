@@ -16,7 +16,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation, MindMapLink } from "@/lib/db";
-import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
 import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
@@ -74,22 +74,21 @@ export async function GET(
     .all(id) as MindMapLink[];
 
   // For each document still marked 'indexing', fire a background status check
-  // against OpenRAG and update SQLite so the next poll sees the new state.
-  // Void — we don't wait for these; the client will pick up the result on its
-  // next 3s refresh. Same fire-and-forget pattern as podcast generation.
+  // against the notebook's configured backend and update SQLite so the next
+  // poll sees the new state. Void — we don't wait for these; the client will
+  // pick up the result on its next 3s refresh.
   for (const doc of documents) {
     if (doc.ingest_status === "indexing" && doc.openrag_id) {
       void (async () => {
         try {
-          const { status, error } = await getTaskStatus(doc.openrag_id!);
+          const rag = getBackend(notebook.rag_backend ?? "openrag");
+          const { status, error } = await rag.getTaskStatus(doc.openrag_id!, notebook);
           if (status !== "indexing") {
             db.prepare("UPDATE documents SET ingest_status = ?, ingest_error = ? WHERE id = ?")
               .run(status, error, doc.id);
-            // When a doc becomes ready, sync the filter so OpenRAG knows it exists.
-            // The POST handler schedules this too, but documents are always 'indexing'
-            // at upload time — so that sync produces an empty list. This is the
-            // call that actually adds the filename to data_sources.
-            if (status === "ready" && notebook.openrag_filter_id) {
+            // When a doc becomes ready, sync the OpenRAG filter so it knows
+            // the file exists. Workbench KBs are self-scoped — no sync needed.
+            if (status === "ready" && notebook.rag_backend !== "workbench" && notebook.openrag_filter_id) {
               scheduleSyncFilterSources(notebook.openrag_filter_id, () =>
                 (db
                   .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
@@ -99,7 +98,7 @@ export async function GET(
             }
           }
         } catch {
-          // OpenRAG unreachable — leave status as 'indexing', retry next poll.
+          // Backend unreachable — leave status as 'indexing', retry next poll.
         }
       })();
     }

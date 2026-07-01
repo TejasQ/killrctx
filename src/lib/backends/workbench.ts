@@ -236,14 +236,17 @@ export const workbenchBackend: RagBackend = {
       return { status: "failed", error: `Job fetch failed: ${res.status}` };
     }
 
-    const data = (await res.json()) as { status: string; error?: string };
+    const data = (await res.json()) as { status: string; errorMessage?: string | null };
     switch (data.status) {
+      case "succeeded":
       case "completed":
       case "ready":
         return { status: "ready", error: null };
       case "failed":
-        return { status: "failed", error: data.error ?? "Ingest failed" };
+      case "error":
+        return { status: "failed", error: data.errorMessage ?? "Ingest failed" };
       default:
+        // "pending", "running", or any other in-progress value
         return { status: "indexing", error: null };
     }
   },

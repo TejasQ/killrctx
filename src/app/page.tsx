@@ -139,9 +139,14 @@ export default function Home() {
                 href={`/notebooks/${nb.id}`}
                 className="block px-4 py-3 pr-12"
               >
-                <div className="text-sm font-medium">{nb.title}</div>
-                <div className="text-xs text-muted">
-                  {new Date(nb.created_at).toLocaleString()}
+                <div className="flex items-center gap-2.5">
+                  <BackendLogo backend={nb.rag_backend} />
+                  <div>
+                    <div className="text-sm font-medium">{nb.title}</div>
+                    <div className="text-xs text-muted">
+                      {new Date(nb.created_at).toLocaleString()}
+                    </div>
+                  </div>
                 </div>
               </Link>
             )}
@@ -213,5 +218,36 @@ function RenameInput({
       />
       <div className="mt-0.5 text-xs text-muted">Enter to save · Esc to cancel</div>
     </div>
+  );
+}
+
+// ============================================================================
+// BackendLogo — tiny icon showing which RAG backend a notebook uses
+// ============================================================================
+// Rendered left of the notebook name on the home page. OpenRAG uses just the
+// dog portion of logo-openrag.png (cropped via CSS); Astra uses its standalone
+// icon mark logo-astra.png. Both are 20×20px to sit flush with the text line.
+// ============================================================================
+function BackendLogo({ backend }: { backend?: string }) {
+  if (backend === "workbench") {
+    return (
+      <img
+        src="/assets/logo-astra.png"
+        alt="Astra"
+        width={20}
+        height={20}
+        className="shrink-0 rounded-sm"
+      />
+    );
+  }
+  // Default to OpenRAG — use the official dog SVG icon.
+  return (
+    <img
+      src="/assets/logo-openrag-dog.svg"
+      alt="OpenRAG"
+      width={20}
+      height={20}
+      className="shrink-0"
+    />
   );
 }

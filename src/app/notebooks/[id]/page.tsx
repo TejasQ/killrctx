@@ -310,20 +310,31 @@ export default function NotebookPage({
           <Link href="/" className="text-sm text-muted hover:text-white">
             ← Notebooks
           </Link>
-          <InlineTitle
-            title={notebook.title}
-            onSave={async (newTitle) => {
-              const res = await fetch(`/api/notebooks/${id}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ title: newTitle }),
-              });
-              if (res.ok) {
-                const { notebook: updated } = await res.json();
-                setNotebook(updated);
-              }
-            }}
-          />
+          <div className="flex items-center gap-1">
+            <img
+              src={notebook.rag_backend === "workbench"
+                ? "/assets/logo-astra.png"
+                : "/assets/logo-openrag-dog.svg"}
+              alt={notebook.rag_backend === "workbench" ? "Astra" : "OpenRAG"}
+              width={20}
+              height={20}
+              className="shrink-0"
+            />
+            <InlineTitle
+              title={notebook.title}
+              onSave={async (newTitle) => {
+                const res = await fetch(`/api/notebooks/${id}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ title: newTitle }),
+                });
+                if (res.ok) {
+                  const { notebook: updated } = await res.json();
+                  setNotebook(updated);
+                }
+              }}
+            />
+          </div>
           {notebook.openrag_filter_name && (
             <FilterPickerPopover
               notebookId={notebook.id}

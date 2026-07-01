@@ -52,7 +52,7 @@ import type { MindMapLink } from "@/lib/db";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
-type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null; rag_backend: "openrag" | "workbench"; workbench_embedding_service_id: string | null };
+type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null; rag_backend: "openrag" | "workbench"; workbench_kb_id: string | null; workbench_embedding_service_id: string | null };
 type Document = { id: string; filename: string; bytes: number; mimetype: string | null; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
 type Conversation = { id: string; notebook_id: string; title: string; created_at: number; workbench_agent_id: string | null };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string; sources_json: string | null };
@@ -297,6 +297,17 @@ export default function NotebookPage({
     const t = setInterval(refresh, 3000);
     return () => clearInterval(t);
   }, [documents]);
+
+  // Poll at 500ms while a new Workbench notebook's KB is still being created.
+  // The background task in POST /api/notebooks writes workbench_kb_id once the
+  // Workbench responds. 500ms feels instant to the user but doesn't hammer the
+  // server; the interval clears itself the moment the ID arrives.
+  useEffect(() => {
+    if (notebook?.rag_backend !== "workbench") return;
+    if (notebook?.workbench_kb_id) return;
+    const t = setInterval(refresh, 500);
+    return () => clearInterval(t);
+  }, [notebook?.rag_backend, notebook?.workbench_kb_id]);
 
   if (!notebook) {
     return <div className="p-8 text-sm text-muted">Loading…</div>;
@@ -856,30 +867,37 @@ function SourcesPanel({
           ‹
         </button>
       </div>
-      {/* Row 2: embedding model picker */}
-      {embeddingModel && (
+      {/* Row 2: embedding model picker (workbench always; openrag when set) */}
+      {(ragBackend === "workbench" || embeddingModel) && (
         <div className="flex items-center border-b border-edge px-4 py-2">
-          <ModelPickerPopover
-            kind="embedding"
-            currentValue={embeddingModel}
-            currentLabel={embeddingLabel}
-            onSaved={onEmbeddingModelSaved}
-            backend={ragBackend}
-            notebookId={notebookId}
-          >
-            <span title="Click to change embedding model" className="text-xs text-muted">
-              model:{" "}
-              <span
-                className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
-                style={{
-                  backgroundImage:
-                    "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
-                }}
-              >
-                {embeddingLabel ?? embeddingModel}
+          {embeddingModel ? (
+            <ModelPickerPopover
+              kind="embedding"
+              currentValue={embeddingModel}
+              currentLabel={embeddingLabel}
+              onSaved={onEmbeddingModelSaved}
+              backend={ragBackend}
+              notebookId={notebookId}
+            >
+              <span title="Click to change embedding model" className="text-xs text-muted">
+                embed:{" "}
+                <span
+                  className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                  }}
+                >
+                  {embeddingLabel ?? embeddingModel}
+                </span>
               </span>
+            </ModelPickerPopover>
+          ) : (
+            // Workbench KB is still being created in the background.
+            <span className="flex items-center gap-1.5 text-xs text-muted">
+              <Spinner size="xs" /> Setting up embedding…
             </span>
-          </ModelPickerPopover>
+          )}
         </div>
       )}
       {/* Row 3: add source buttons + optional URL input */}

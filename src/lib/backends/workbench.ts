@@ -47,6 +47,12 @@ function defaultAgentId(): string {
   return id;
 }
 
+function defaultEmbeddingServiceId(): string {
+  const id = process.env.WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID;
+  if (!id) throw new Error("WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID is not set");
+  return id;
+}
+
 function chunkingServiceId(): string {
   const id = process.env.WORKBENCH_CHUNKING_SERVICE_ID;
   if (!id) throw new Error("WORKBENCH_CHUNKING_SERVICE_ID is not set");
@@ -276,6 +282,11 @@ export const workbenchBackend: RagBackend = {
       .replace(/^([^A-Za-z])/, "N$1")
       .slice(0, 48) || "notebook";
 
+    // Fall back to the env-var default when no embedding service was specified
+    // (e.g. notebooks created before the model picker was added, or when the
+    // picker was removed and the caller no longer passes this field).
+    const embeddingServiceId = args.embeddingServiceId ?? defaultEmbeddingServiceId();
+
     const url = wsPath("/knowledge-bases");
     const res = await fetch(url, {
       method: "POST",
@@ -283,7 +294,7 @@ export const workbenchBackend: RagBackend = {
       body: JSON.stringify({
         name: safeName,
         description: `Knowledge base for notebook: ${args.notebookTitle}`,
-        embeddingServiceId: args.embeddingServiceId,
+        embeddingServiceId,
         chunkingServiceId: chunkingServiceId(),
       }),
     });

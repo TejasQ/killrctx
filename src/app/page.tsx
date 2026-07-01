@@ -21,8 +21,6 @@ import Spinner from "@/components/Spinner";
 import MenuButton from "@/components/MenuButton";
 
 type Notebook = { id: string; title: string; created_at: number; rag_backend?: string };
-type WbAgent = { agentId: string; name: string; description: string | null };
-type WbEmbedding = { embeddingServiceId: string; name: string };
 
 export default function Home() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -32,10 +30,6 @@ export default function Home() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   // Backend selection for new notebook creation
   const [ragBackend, setRagBackend] = useState<"openrag" | "workbench">("openrag");
-  const [wbAgents, setWbAgents] = useState<WbAgent[]>([]);
-  const [wbEmbeddings, setWbEmbeddings] = useState<WbEmbedding[]>([]);
-  const [wbAgentId, setWbAgentId] = useState("");
-  const [wbEmbeddingId, setWbEmbeddingId] = useState("");
 
   // Fetch the list on mount. We do an optimistic prepend on create (below)
   // so we don't need to refetch after — but if you ever add deletion or
@@ -45,28 +39,13 @@ export default function Home() {
     const data = await res.json();
     setNotebooks(data.notebooks);
   }
-  useEffect(() => {
-    load();
-    // Pre-fetch Workbench options so the picker is instant when selected.
-    fetch("/api/workbench/agents").then((r) => r.json()).then((d) => {
-      setWbAgents(d.items ?? []);
-      if (d.items?.length) setWbAgentId(d.items[0].agentId);
-    }).catch(() => {});
-    fetch("/api/workbench/embedding-services").then((r) => r.json()).then((d) => {
-      setWbEmbeddings(d.items ?? []);
-      if (d.items?.length) setWbEmbeddingId(d.items[0].embeddingServiceId);
-    }).catch(() => {});
-  }, []);
+  useEffect(() => { load(); }, []);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
     setCreating(true);
     try {
       const body: Record<string, string> = { title, rag_backend: ragBackend };
-      if (ragBackend === "workbench") {
-        if (wbAgentId) body.workbench_agent_id = wbAgentId;
-        if (wbEmbeddingId) body.workbench_embedding_service_id = wbEmbeddingId;
-      }
       const res = await fetch("/api/notebooks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -139,38 +118,6 @@ export default function Home() {
             {creating ? "Creating…" : "Create"}
           </button>
         </div>
-        {ragBackend === "workbench" && (
-          <div className="flex gap-2 text-xs">
-            {wbEmbeddings.length > 0 && (
-              <label className="flex items-center gap-1">
-                <span className="text-muted">Embedding:</span>
-                <select
-                  value={wbEmbeddingId}
-                  onChange={(e) => setWbEmbeddingId(e.target.value)}
-                  className="rounded border border-edge bg-panel px-1.5 py-1"
-                >
-                  {wbEmbeddings.map((e) => (
-                    <option key={e.embeddingServiceId} value={e.embeddingServiceId}>{e.name}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-            {wbAgents.length > 0 && (
-              <label className="flex items-center gap-1">
-                <span className="text-muted">Agent:</span>
-                <select
-                  value={wbAgentId}
-                  onChange={(e) => setWbAgentId(e.target.value)}
-                  className="rounded border border-edge bg-panel px-1.5 py-1"
-                >
-                  {wbAgents.map((a) => (
-                    <option key={a.agentId} value={a.agentId}>{a.name}</option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </div>
-        )}
       </form>
 
       <ul className="grid gap-3">

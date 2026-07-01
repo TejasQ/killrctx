@@ -25,13 +25,40 @@
 //   Last-conv reset:      200 { conversation: Conversation }
 // ============================================================================
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Conversation, Message, Notebook } from "@/lib/db";
 import { deleteConversation as deleteOpenRagConversation } from "@/lib/openrag";
 import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
+
+/**
+ * PATCH /api/notebooks/[id]/conversations/[convId]
+ *
+ * Body: { workbench_agent_id: string }
+ *
+ * Changes the Workbench agent bound to this conversation. Does not touch
+ * the existing Workbench conversation thread — just updates the stored
+ * agent ID so the next message uses the new agent.
+ */
+export async function PATCH(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string; convId: string }> },
+) {
+  const { convId } = await ctx.params;
+  const body = (await req.json().catch(() => ({}))) as { workbench_agent_id?: string };
+  if (!body.workbench_agent_id) {
+    return NextResponse.json({ error: "workbench_agent_id is required" }, { status: 400 });
+  }
+  const updated = db.prepare(
+    "UPDATE conversations SET workbench_agent_id = ? WHERE id = ?",
+  ).run(body.workbench_agent_id, convId);
+  if (updated.changes === 0) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  return NextResponse.json({ ok: true });
+}
 
 /** DELETE /api/notebooks/[id]/conversations/[convId] */
 export async function DELETE(

@@ -155,17 +155,26 @@ export async function PATCH(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { title } = (await req.json()) as { title?: string };
-  const trimmed = title?.trim();
-  if (!trimmed) {
-    return NextResponse.json({ error: "title is required" }, { status: 400 });
-  }
+  const body = (await req.json()) as { title?: string; workbench_embedding_service_id?: string };
 
   const notebook = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook | undefined;
   if (!notebook) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
+  if (body.workbench_embedding_service_id !== undefined) {
+    // Update the Workbench embedding service ID stored on the notebook.
+    db.prepare("UPDATE notebooks SET workbench_embedding_service_id = ? WHERE id = ?")
+      .run(body.workbench_embedding_service_id, id);
+    const updated = db.prepare("SELECT * FROM notebooks WHERE id = ?").get(id) as Notebook;
+    return NextResponse.json({ notebook: updated });
+  }
+
+  const trimmed = body.title?.trim();
+  if (!trimmed) {
+    return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
 
   db.prepare("UPDATE notebooks SET title = ? WHERE id = ?").run(trimmed, id);

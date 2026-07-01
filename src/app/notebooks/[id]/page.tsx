@@ -44,7 +44,7 @@ import Spinner from "@/components/Spinner";
 // would throw and silently swallow the content panel.
 const MindMapRenderer = dynamic(() => import("@/components/MindMapRenderer"), { ssr: false });
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
-import ModelPickerPopover from "@/components/ModelPickerPopover";
+import ModelPickerPopover, { type PickerSaveResult } from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
 import SourceCitation from "@/components/SourceCitation";
 import type { Source } from "openrag-sdk";
@@ -52,9 +52,9 @@ import type { MindMapLink } from "@/lib/db";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
-type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null };
+type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null; rag_backend: "openrag" | "workbench"; workbench_embedding_service_id: string | null };
 type Document = { id: string; filename: string; bytes: number; mimetype: string | null; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
-type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
+type Conversation = { id: string; notebook_id: string; title: string; created_at: number; workbench_agent_id: string | null };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string; sources_json: string | null };
 type Note = {
   id: string;
@@ -81,6 +81,12 @@ export default function NotebookPage({
   const [documents, setDocuments] = useState<Document[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // Display names for Workbench IDs. Populated once on first load of a workbench
+  // notebook; updated optimistically when the user picks a new agent/service.
+  const [wbNames, setWbNames] = useState<{ agents: Map<string,string>; embeddings: Map<string,string> }>({
+    agents: new Map(),
+    embeddings: new Map(),
+  });
   const [messages, setMessages] = useState<Message[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [mindMapLinks, setMindMapLinks] = useState<MindMapLink[]>([]);
@@ -167,6 +173,28 @@ export default function NotebookPage({
     setMessages(data.messages);
     setNotes(data.notes);
     setMindMapLinks(data.mindMapLinks ?? []);
+
+    // For Workbench notebooks, fetch agent and embedding-service names once so
+    // the pickers can show "llama-3-70b" instead of "e5a643ad-8fae-…".
+    if (data.notebook?.rag_backend === "workbench") {
+      setWbNames((prev) => {
+        // Only fetch if the maps are still empty (first load).
+        if (prev.agents.size > 0 || prev.embeddings.size > 0) return prev;
+        void Promise.all([
+          fetch("/api/workbench/agents").then((r) => r.json()).catch(() => ({ items: [] })),
+          fetch("/api/workbench/embedding-services").then((r) => r.json()).catch(() => ({ items: [] })),
+        ]).then(([agentsData, embData]) => {
+          const agents = new Map<string, string>(
+            (agentsData.items ?? []).map((a: { agentId: string; name: string }) => [a.agentId, a.name]),
+          );
+          const embeddings = new Map<string, string>(
+            (embData.items ?? []).map((e: { embeddingServiceId: string; name: string }) => [e.embeddingServiceId, e.name]),
+          );
+          setWbNames({ agents, embeddings });
+        });
+        return prev; // return unchanged until the fetch resolves
+      });
+    }
   }
 
   // frameQuestion builds the contextual question string sent to chat.
@@ -309,28 +337,79 @@ export default function NotebookPage({
           )}
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
-          {openragSettings && (
-            <ModelPickerPopover
-              kind="llm"
-              currentValue={openragSettings.llm}
-              onSaved={setOpenragSettings}
-              align="right"
-            >
-              <span title="Click to change model">
-                model:{" "}
-                <span
-                  className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+          {notebook.rag_backend === "workbench" ? (
+            // Workbench: show the agent name bound to the active conversation.
+            (() => {
+              const activeConv = conversations.find((c) => c.id === activeConvId);
+              const agentId = activeConv?.workbench_agent_id ?? "";
+              const agentLabel = wbNames.agents.get(agentId) ?? (agentId || "default");
+              return (
+                <ModelPickerPopover
+                  kind="llm"
+                  currentValue={agentId}
+                  currentLabel={agentLabel}
+                  onSaved={(result: PickerSaveResult) => {
+                    if (result.backend === "workbench" && result.kind === "llm") {
+                      setConversations((cs) =>
+                        cs.map((c) =>
+                          c.id === activeConvId ? { ...c, workbench_agent_id: result.agentId } : c,
+                        ),
+                      );
+                      // Cache the name so the trigger updates immediately.
+                      setWbNames((prev) => ({
+                        ...prev,
+                        agents: new Map(prev.agents).set(result.agentId, result.agentName),
+                      }));
+                    }
                   }}
+                  align="right"
+                  backend="workbench"
+                  notebookId={id}
+                  convId={activeConvId ?? undefined}
                 >
-                  {openragSettings.llm}
+                  <span title="Click to change agent">
+                    model:{" "}
+                    <span
+                      className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                      style={{
+                        backgroundImage:
+                          "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                      }}
+                    >
+                      {agentLabel}
+                    </span>
+                  </span>
+                </ModelPickerPopover>
+              );
+            })()
+          ) : (
+            openragSettings && (
+              <ModelPickerPopover
+                kind="llm"
+                currentValue={openragSettings.llm}
+                onSaved={(result: PickerSaveResult) => {
+                  if (result.backend === "openrag") setOpenragSettings(result.settings);
+                }}
+                align="right"
+              >
+                <span title="Click to change model">
+                  model:{" "}
+                  <span
+                    className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                    }}
+                  >
+                    {openragSettings.llm}
+                  </span>
                 </span>
-              </span>
-            </ModelPickerPopover>
+              </ModelPickerPopover>
+            )
           )}
-          <span>collection: {notebook.openrag_collection}</span>
+          {notebook.rag_backend !== "workbench" && (
+            <span>collection: {notebook.openrag_collection}</span>
+          )}
         </div>
       </header>
 
@@ -347,8 +426,30 @@ export default function NotebookPage({
           notebookId={id}
           documents={documents}
           onUploaded={refresh}
-          embeddingModel={openragSettings?.embedding ?? null}
-          onEmbeddingModelSaved={setOpenragSettings}
+          ragBackend={notebook.rag_backend}
+          embeddingModel={
+            notebook.rag_backend === "workbench"
+              ? notebook.workbench_embedding_service_id
+              : (openragSettings?.embedding ?? null)
+          }
+          embeddingLabel={
+            notebook.rag_backend === "workbench" && notebook.workbench_embedding_service_id
+              ? (wbNames.embeddings.get(notebook.workbench_embedding_service_id) ?? notebook.workbench_embedding_service_id)
+              : undefined
+          }
+          onEmbeddingModelSaved={(result: PickerSaveResult) => {
+            if (result.backend === "openrag") setOpenragSettings(result.settings);
+            else if (result.backend === "workbench" && result.kind === "embedding") {
+              setNotebook((prev) =>
+                prev ? { ...prev, workbench_embedding_service_id: result.embeddingServiceId } : prev,
+              );
+              // Cache the name so the trigger updates immediately.
+              setWbNames((prev) => ({
+                ...prev,
+                embeddings: new Map(prev.embeddings).set(result.embeddingServiceId, result.embeddingServiceName),
+              }));
+            }
+          }}
           collapsed={sourcesCollapsed}
           onToggle={() => setSourcesCollapsed((v) => !v)}
           onResizeDrag={startSourcesResize}
@@ -507,7 +608,9 @@ function SourcesPanel({
   notebookId,
   documents,
   onUploaded,
+  ragBackend,
   embeddingModel,
+  embeddingLabel,
   onEmbeddingModelSaved,
   collapsed,
   onToggle,
@@ -518,8 +621,10 @@ function SourcesPanel({
   notebookId: string;
   documents: Document[];
   onUploaded: () => void;
+  ragBackend: "openrag" | "workbench";
   embeddingModel: string | null;
-  onEmbeddingModelSaved: (s: import("@/components/OpenRAGContext").OpenRAGSettings) => void;
+  embeddingLabel?: string;
+  onEmbeddingModelSaved: (result: PickerSaveResult) => void;
   collapsed: boolean;
   onToggle: () => void;
   onResizeDrag: (startX: number) => void;
@@ -746,7 +851,10 @@ function SourcesPanel({
           <ModelPickerPopover
             kind="embedding"
             currentValue={embeddingModel}
+            currentLabel={embeddingLabel}
             onSaved={onEmbeddingModelSaved}
+            backend={ragBackend}
+            notebookId={notebookId}
           >
             <span title="Click to change embedding model" className="text-xs text-muted">
               model:{" "}
@@ -757,7 +865,7 @@ function SourcesPanel({
                     "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
                 }}
               >
-                {embeddingModel}
+                {embeddingLabel ?? embeddingModel}
               </span>
             </span>
           </ModelPickerPopover>

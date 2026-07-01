@@ -6,20 +6,21 @@
 // We insert a row into `conversations` and return it so the client can
 // immediately switch the active conversation without a full refresh.
 //
-// Title defaults to "Conversation <n+1>" where n is the current count of
-// conversations for this notebook — simple, predictable, no user input needed.
+// For Workbench notebooks we also create the conversation on the Workbench
+// (binding the notebook's KB so the agent can search it).
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook, Conversation } from "@/lib/db";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
 /**
  * POST /api/notebooks/[id]/conversations
  *
- * Body: { title?: string }  (title defaults to "Conversation <n+1>")
+ * Body: { title?: string, workbench_agent_id?: string }
  * Response: { conversation: Conversation }
  */
 export async function POST(
@@ -35,7 +36,10 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const { title } = (await req.json().catch(() => ({}))) as { title?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    title?: string;
+    workbench_agent_id?: string;
+  };
 
   // Auto-number the title if none was provided.
   const count = (
@@ -43,12 +47,33 @@ export async function POST(
       .prepare("SELECT COUNT(*) AS n FROM conversations WHERE notebook_id = ?")
       .get(id) as { n: number }
   ).n;
-  const resolvedTitle = title?.trim() || `Conversation ${count + 1}`;
+  const resolvedTitle = body.title?.trim() || `Conversation ${count + 1}`;
 
   const convId = uuid();
-  db.prepare(
-    "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
-  ).run(convId, id, resolvedTitle, Date.now());
+
+  if (notebook.rag_backend === "workbench") {
+    const agentId = body.workbench_agent_id ?? process.env.WORKBENCH_DEFAULT_AGENT_ID ?? "";
+    const rag = getBackend("workbench");
+    try {
+      const { conversationId } = await rag.createConversation({
+        notebook,
+        agentId,
+        title: resolvedTitle,
+      });
+      db.prepare(
+        "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id, workbench_conversation_id) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(convId, id, resolvedTitle, Date.now(), agentId, conversationId);
+    } catch {
+      // Workbench unreachable — create the SQLite row without a remote conversation.
+      db.prepare(
+        "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id) VALUES (?, ?, ?, ?, ?)",
+      ).run(convId, id, resolvedTitle, Date.now(), agentId);
+    }
+  } else {
+    db.prepare(
+      "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
+    ).run(convId, id, resolvedTitle, Date.now());
+  }
 
   const conversation = db
     .prepare("SELECT * FROM conversations WHERE id = ?")

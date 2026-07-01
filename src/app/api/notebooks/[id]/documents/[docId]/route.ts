@@ -20,6 +20,7 @@
 import { NextResponse } from "next/server";
 import db, { Document, Notebook } from "@/lib/db";
 import { deleteDocument, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -37,25 +38,28 @@ export async function DELETE(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Drop the SQLite pointer first — even if OpenRAG cleanup fails, the
-  // user-visible source list reflects the user's intent. OpenRAG cleanup is
-  // best-effort.
+  const notebook = db
+    .prepare("SELECT * FROM notebooks WHERE id = ?")
+    .get(id) as Notebook | undefined;
+
+  // Drop the SQLite pointer first — even if backend cleanup fails, the
+  // user-visible source list reflects the user's intent.
   db.prepare("DELETE FROM documents WHERE id = ?").run(docId);
 
+  // Backend cleanup (best-effort).
   try {
-    await deleteDocument(doc.filename);
+    if (notebook?.rag_backend === "workbench") {
+      const rag = getBackend("workbench");
+      await rag.deleteDocument(doc.filename, notebook);
+    } else {
+      await deleteDocument(doc.filename);
+    }
   } catch {
-    // Swallow — the row is already gone from our table; the chunks linger
-    // until next OpenRAG restart at worst. Not a hard failure.
+    // Swallow — the row is already gone from our table.
   }
 
-  // Schedule a debounced filter sync. Bulk-deletes call this route once per
-  // file in quick succession — debouncing means only one get → update fires
-  // after all the deletes settle, with the final SQLite state as ground truth.
-  const notebook = db
-    .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
-    .get(id) as Pick<Notebook, "openrag_filter_id"> | undefined;
-  if (notebook?.openrag_filter_id) {
+  // Filter sync (OpenRAG only — Workbench KBs are self-scoped).
+  if (notebook?.rag_backend !== "workbench" && notebook?.openrag_filter_id) {
     const filterId = notebook.openrag_filter_id;
     scheduleSyncFilterSources(filterId, () =>
       (db

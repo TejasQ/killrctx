@@ -213,11 +213,18 @@ These are thin proxies so the browser never talks to `:8080` directly.
 
 - `src/lib/openrag.ts` — still the low-level OpenRAG SDK wrapper (used by
   `backends/openrag.ts`)
-- The podcast feature — only works with OpenRAG (Workbench notebooks skip or
-  disable the podcast button)
-- Studio note generation — continues using whatever backend the notebook has
 - All UI components that render messages — they consume the same shape
   regardless of backend
+
+## What adapts transparently
+
+- **Podcast / Studio note generation** — these call `chat()` with a long
+  prompt and get grounded text back. Once they route through `getBackend()`
+  instead of importing `openrag.ts` directly, they work on either backend
+  with no special handling. The Workbench agent's `search_kb` tool does the
+  same retrieval step that OpenRAG's agent does.
+- **ElevenLabs TTS** — completely backend-agnostic (it just needs a script
+  string).
 
 ---
 

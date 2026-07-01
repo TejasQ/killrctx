@@ -21,6 +21,6 @@
 - [ ] TASK-17: [UI] Add backend picker (OpenRAG / Workbench) to notebook creation dialog
 - [ ] TASK-18: [UI] Add embedding service picker for Workbench notebooks (fetches from proxy route)
 - [ ] TASK-19: [UI] Add agent picker to conversation creation for Workbench notebooks
-- [ ] TASK-20: [UI] Disable podcast button for Workbench-backed notebooks
+- [ ] TASK-20: [API] Update podcast/note generation routes to use `getBackend()` instead of importing openrag directly
 - [ ] TASK-21: [env] Add Workbench env vars to `.env.example`
 - [ ] TASK-22: [verify] Run `npm run build`, confirm zero errors, manual smoke test

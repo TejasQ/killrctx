@@ -103,6 +103,5 @@ the Workbench in sync.
 - Workbench agent creation/editing (we use pre-existing agents).
 - Reranking configuration.
 - RLAC / multi-tenant principal management.
-- Podcast generation via Workbench (podcasts still use OpenRAG or skip if on Workbench).
 - Non-streaming chat (streaming-only for Workbench is fine).
 - Migrating an existing notebook from one backend to the other.

@@ -111,7 +111,7 @@ export interface RagBackend {
   createConversation(args: CreateConversationArgs): Promise<{ conversationId: string | null }>;
 
   /** Delete a conversation on the backend. */
-  deleteConversation(conversationId: string, notebook: Notebook): Promise<void>;
+  deleteConversation(conversationId: string, notebook: Notebook, agentId?: string | null): Promise<void>;
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────

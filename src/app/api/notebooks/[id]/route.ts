@@ -220,7 +220,9 @@ export async function DELETE(
         .all(id) as { workbench_conversation_id: string | null; workbench_agent_id: string | null }[];
       for (const c of convos) {
         if (c.workbench_conversation_id) {
-          cleanupTasks.push(rag.deleteConversation(c.workbench_conversation_id, notebook));
+          cleanupTasks.push(
+            rag.deleteConversation(c.workbench_conversation_id, notebook, c.workbench_agent_id),
+          );
         }
       }
     } else {

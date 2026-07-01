@@ -100,7 +100,11 @@ export async function DELETE(
     try {
       if (isWorkbench && conversation!.workbench_conversation_id && notebook) {
         const rag = getBackend("workbench");
-        await rag.deleteConversation(conversation!.workbench_conversation_id, notebook);
+        await rag.deleteConversation(
+          conversation!.workbench_conversation_id,
+          notebook,
+          conversation!.workbench_agent_id,
+        );
       } else if (!isWorkbench && lastAssistant?.response_id) {
         await deleteOpenRagConversation(lastAssistant.response_id);
       }

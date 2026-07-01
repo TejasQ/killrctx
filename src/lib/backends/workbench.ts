@@ -328,14 +328,11 @@ export const workbenchBackend: RagBackend = {
     return { conversationId: data.conversationId };
   },
 
-  async deleteConversation(conversationId: string, notebook: Notebook) {
-    // We need the agent ID to form the URL. Read it from the conversation
-    // row... but at this layer we only have the conversationId. The notebook
-    // doesn't carry it. We'll use the default agent as a fallback — the
-    // Workbench routes conversations under agents but deletion works as long
-    // as the conversation exists under the workspace.
-    const agentId = defaultAgentId();
-    const url = wsPath(`/agents/${agentId}/conversations/${conversationId}`);
+  async deleteConversation(conversationId: string, _notebook: Notebook, agentId?: string | null) {
+    // Use the agent that owns the conversation; fall back to the default only
+    // if the caller doesn't know which agent was used (e.g. legacy rows).
+    const agent = agentId ?? defaultAgentId();
+    const url = wsPath(`/agents/${agent}/conversations/${conversationId}`);
     await fetch(url, { method: "DELETE", headers: headers() });
   },
 };

@@ -23,6 +23,7 @@ import type {
   DeleteResourcesArgs,
   CreateConversationArgs,
 } from "../rag";
+import type { Notebook } from "../db";
 
 import * as openrag from "../openrag";
 
@@ -100,7 +101,7 @@ export const openragBackend: RagBackend = {
     return { conversationId: null };
   },
 
-  async deleteConversation(conversationId: string) {
+  async deleteConversation(conversationId: string, _notebook: Notebook, _agentId?: string | null) {
     // conversationId here is the OpenRAG chatId (response_id from messages).
     // Only delete if we have a real ID — early conversations may have none.
     if (conversationId) {

@@ -135,20 +135,61 @@ export async function POST(
         if (isWorkbench) {
           // ── Workbench streaming path ──
           const rag = getBackend("workbench");
-          const events = rag.chatStream({
-            prompt: grounded,
-            notebook,
-            workbenchAgentId: conversation.workbench_agent_id,
-            workbenchConversationId: conversation.workbench_conversation_id,
-          });
+          const agentId = conversation.workbench_agent_id ?? process.env.WORKBENCH_DEFAULT_AGENT_ID ?? "";
+          let convId = conversation.workbench_conversation_id;
 
-          for await (const event of events) {
-            if (event.type === "token") {
-              assembled += event.delta;
-              send({ type: "delta", text: event.delta });
-            } else if (event.type === "done") {
-              responseId = event.responseId;
+          // If the conversation is missing on the Workbench side (e.g. it was
+          // never created, or was deleted externally), create a fresh one and
+          // save it so subsequent messages work without re-healing.
+          if (!convId) {
+            try {
+              const result = await rag.createConversation({ notebook: notebook!, agentId, title: conversation.title });
+              convId = result.conversationId;
+              if (convId) {
+                db.prepare(
+                  "UPDATE conversations SET workbench_conversation_id = ? WHERE id = ?",
+                ).run(convId, conversationId);
+              }
+            } catch {
+              // createConversation failed — chatStream will throw below and
+              // surface an error to the user.
             }
+          }
+
+          async function streamConversation(wbConvId: string | null) {
+            const events = rag.chatStream({
+              prompt: grounded,
+              notebook: notebook!,
+              workbenchAgentId: agentId,
+              workbenchConversationId: wbConvId,
+            });
+            for await (const event of events) {
+              if (event.type === "token") {
+                assembled += event.delta;
+                send({ type: "delta", text: event.delta });
+              } else if (event.type === "done") {
+                responseId = event.responseId;
+              }
+            }
+          }
+
+          try {
+            await streamConversation(convId);
+          } catch (err) {
+            // Workbench returned 404 — the stored conversation_id is stale.
+            // Create a new conversation, persist it, and retry once.
+            const is404 = err instanceof Error && err.message.includes("conversation_not_found");
+            if (!is404) throw err;
+
+            const result = await rag.createConversation({ notebook: notebook!, agentId, title: conversation.title });
+            convId = result.conversationId;
+            if (convId) {
+              db.prepare(
+                "UPDATE conversations SET workbench_conversation_id = ? WHERE id = ?",
+              ).run(convId, conversationId);
+            }
+            assembled = "";
+            await streamConversation(convId);
           }
         } else {
           // ── OpenRAG streaming path (unchanged behaviour) ──

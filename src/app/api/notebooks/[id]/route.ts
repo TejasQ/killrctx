@@ -17,6 +17,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation, MindMapLink } from "@/lib/db";
 import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -178,12 +179,14 @@ export async function PATCH(
 /**
  * DELETE /api/notebooks/[id]
  *
- * Cleans up all OpenRAG resources for the notebook (filter, document chunks,
- * chat threads from messages + notes) then drops the SQLite row. The schema's
- * `ON DELETE CASCADE` foreign keys handle child rows automatically.
+ * Cleans up all backend resources for the notebook then drops the SQLite row.
+ * The schema's `ON DELETE CASCADE` foreign keys handle child rows automatically.
  *
- * All OpenRAG deletions run in parallel via Promise.allSettled — failures are
- * swallowed so the SQLite delete always fires even when OpenRAG is unreachable.
+ * - OpenRAG: deletes filter, document chunks, and chat threads.
+ * - Workbench: deletes the Knowledge Base (cascades documents + collection).
+ *
+ * All deletions run in parallel via Promise.allSettled — failures are
+ * swallowed so the SQLite delete always fires even when the backend is down.
  */
 export async function DELETE(
   _: Request,
@@ -196,34 +199,49 @@ export async function DELETE(
     .get(id) as Notebook | undefined;
 
   if (notebook) {
-    const documents = db
-      .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
-      .all(id) as Pick<Document, "filename">[];
-
-    // Collect every response_id that represents an OpenRAG chat thread —
-    // both message threads (one per conversation) and note threads.
-    const msgResponseIds = db
-      .prepare(
-        `SELECT DISTINCT response_id FROM messages
-         WHERE notebook_id = ? AND response_id IS NOT NULL`,
-      )
-      .all(id) as { response_id: string }[];
-    const noteResponseIds = db
-      .prepare(
-        "SELECT response_id FROM notes WHERE notebook_id = ? AND response_id IS NOT NULL",
-      )
-      .all(id) as { response_id: string }[];
-
     const cleanupTasks: Promise<unknown>[] = [];
 
-    if (notebook.openrag_filter_id) {
-      cleanupTasks.push(deleteFilter(notebook.openrag_filter_id));
-    }
-    for (const { filename } of documents) {
-      cleanupTasks.push(deleteDocument(filename));
-    }
-    for (const { response_id } of [...msgResponseIds, ...noteResponseIds]) {
-      cleanupTasks.push(deleteConversation(response_id));
+    if (notebook.rag_backend === "workbench") {
+      // ── Workbench path: deleting the KB cascades documents + chunks ──
+      const rag = getBackend("workbench");
+      cleanupTasks.push(rag.deleteNotebookResources({ notebook }));
+
+      // Also delete conversations on the Workbench side.
+      const convos = db
+        .prepare("SELECT workbench_conversation_id, workbench_agent_id FROM conversations WHERE notebook_id = ?")
+        .all(id) as { workbench_conversation_id: string | null; workbench_agent_id: string | null }[];
+      for (const c of convos) {
+        if (c.workbench_conversation_id) {
+          cleanupTasks.push(rag.deleteConversation(c.workbench_conversation_id, notebook));
+        }
+      }
+    } else {
+      // ── OpenRAG path: clean up filter, doc chunks, and chat threads ──
+      const documents = db
+        .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+        .all(id) as Pick<Document, "filename">[];
+
+      const msgResponseIds = db
+        .prepare(
+          `SELECT DISTINCT response_id FROM messages
+           WHERE notebook_id = ? AND response_id IS NOT NULL`,
+        )
+        .all(id) as { response_id: string }[];
+      const noteResponseIds = db
+        .prepare(
+          "SELECT response_id FROM notes WHERE notebook_id = ? AND response_id IS NOT NULL",
+        )
+        .all(id) as { response_id: string }[];
+
+      if (notebook.openrag_filter_id) {
+        cleanupTasks.push(deleteFilter(notebook.openrag_filter_id));
+      }
+      for (const { filename } of documents) {
+        cleanupTasks.push(deleteDocument(filename));
+      }
+      for (const { response_id } of [...msgResponseIds, ...noteResponseIds]) {
+        cleanupTasks.push(deleteConversation(response_id));
+      }
     }
 
     // allSettled — never throws; we don't care which individual steps failed.

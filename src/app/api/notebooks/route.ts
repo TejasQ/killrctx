@@ -5,19 +5,19 @@
 // _Basically_, the home page calls GET to render its list and POST to create
 // a new notebook before navigating to /notebooks/<id>.
 //
-// On creation we also create an OpenRAG knowledge filter for the notebook so
-// every chat, note, and podcast call can scope retrieval to only this
-// notebook's documents. The filter ID + name are stored in SQLite so the UI
-// can display the filter chip without a round-trip to OpenRAG.
+// On creation we set up backend-specific resources:
+//   - OpenRAG: create a knowledge filter for retrieval scoping
+//   - Workbench: create a Knowledge Base (Astra collection) for this notebook
 //
-// Filter creation is best-effort — if OpenRAG is down the notebook is still
-// created; the document ingest route will retry (see documents/route.ts).
+// Backend resource creation is best-effort — if the backend is down the
+// notebook is still created; routes will retry on first use.
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook } from "@/lib/db";
 import { createFilter } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 // Force Node.js runtime — better-sqlite3 is a native module and won't load
 // under the Edge runtime.
@@ -34,40 +34,86 @@ export async function GET() {
 /**
  * POST /api/notebooks — create a notebook.
  *
- * Body: { title?: string }   (defaults to "Untitled notebook")
+ * Body: {
+ *   title?: string,
+ *   rag_backend?: "openrag" | "workbench",
+ *   workbench_embedding_service_id?: string,
+ *   workbench_agent_id?: string
+ * }
  *
  * Returns the freshly-inserted row so the client can navigate straight to it
  * without a follow-up GET.
  */
 export async function POST(req: NextRequest) {
-  const { title } = (await req.json()) as { title?: string };
+  const body = (await req.json()) as {
+    title?: string;
+    rag_backend?: "openrag" | "workbench";
+    workbench_embedding_service_id?: string;
+    workbench_agent_id?: string;
+  };
 
   const id = uuid();
-  // `nb_<id>` form is reserved for future OpenRAG /knowledge-filter
-  // partitioning. Right now nothing reads this field.
   const collection = `nb_${id.replace(/-/g, "")}`;
-
-  const resolvedTitle = title?.trim() || "Untitled notebook";
+  const resolvedTitle = body.title?.trim() || "Untitled notebook";
+  const ragBackend = body.rag_backend ?? "openrag";
   const now = Date.now();
+
   db.prepare(
-    "INSERT INTO notebooks (id, title, created_at, openrag_collection) VALUES (?, ?, ?, ?)",
-  ).run(id, resolvedTitle, now, collection);
+    "INSERT INTO notebooks (id, title, created_at, openrag_collection, rag_backend) VALUES (?, ?, ?, ?, ?)",
+  ).run(id, resolvedTitle, now, collection, ragBackend);
 
   // Seed a default conversation so the Chat panel always has an activeConvId.
   const convId = uuid();
-  db.prepare(
-    "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
-  ).run(convId, id, "Conversation 1", now);
 
-  // Create the OpenRAG knowledge filter. Best-effort — if OpenRAG is unreachable
-  // the notebook row already exists; the ingest route will retry on first upload.
-  try {
-    const { filterId, filterName } = await createFilter(resolvedTitle);
+  if (ragBackend === "workbench") {
+    // ── Workbench path: create a Knowledge Base on the Workbench ──
+    const rag = getBackend("workbench");
+    try {
+      const { resourceId } = await rag.createNotebookResources({
+        notebookId: id,
+        notebookTitle: resolvedTitle,
+        embeddingServiceId: body.workbench_embedding_service_id,
+      });
+      db.prepare(
+        "UPDATE notebooks SET workbench_kb_id = ?, workbench_embedding_service_id = ? WHERE id = ?",
+      ).run(resourceId, body.workbench_embedding_service_id ?? null, id);
+    } catch {
+      // Workbench unreachable — KB columns stay NULL; ingest will fail later
+      // with a clear error message.
+    }
+
+    // Create the conversation on the Workbench too (needs the KB binding).
+    const notebook = db.prepare("SELECT * FROM notebooks WHERE id = ?").get(id) as Notebook;
+    const agentId = body.workbench_agent_id ?? process.env.WORKBENCH_DEFAULT_AGENT_ID ?? "";
+    try {
+      const { conversationId } = await rag.createConversation({
+        notebook,
+        agentId,
+        title: "Conversation 1",
+      });
+      db.prepare(
+        "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id, workbench_conversation_id) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(convId, id, "Conversation 1", now, agentId, conversationId);
+    } catch {
+      // Fallback: create the SQLite row without a Workbench conversation.
+      db.prepare(
+        "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id) VALUES (?, ?, ?, ?, ?)",
+      ).run(convId, id, "Conversation 1", now, agentId);
+    }
+  } else {
+    // ── OpenRAG path: create a knowledge filter ──
     db.prepare(
-      "UPDATE notebooks SET openrag_filter_id = ?, openrag_filter_name = ? WHERE id = ?",
-    ).run(filterId, filterName, id);
-  } catch {
-    // OpenRAG down at creation time — filter columns stay NULL.
+      "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, ?, ?)",
+    ).run(convId, id, "Conversation 1", now);
+
+    try {
+      const { filterId, filterName } = await createFilter(resolvedTitle);
+      db.prepare(
+        "UPDATE notebooks SET openrag_filter_id = ?, openrag_filter_name = ? WHERE id = ?",
+      ).run(filterId, filterName, id);
+    } catch {
+      // OpenRAG down at creation time — filter columns stay NULL.
+    }
   }
 
   const nb = db

@@ -29,7 +29,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Note, Conversation, buildQueryConfig } from "@/lib/db";
+import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
 import { draftScript, parseScript, synthesizeAndStitch, type ChatFn } from "@/lib/podcast";
 import { getBackend } from "@/lib/rag";
 
@@ -56,10 +56,11 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { topic, title, selectedFilenames } = (await req.json().catch(() => ({}))) as {
+  const { topic, title, selectedFilenames, workbenchAgentId } = (await req.json().catch(() => ({}))) as {
     topic?: string;
     title?: string;
     selectedFilenames?: string[];
+    workbenchAgentId?: string;
   };
 
   const notebook = db
@@ -74,19 +75,18 @@ export async function POST(
     : { filterId: null, sourcePaths: null, limit: null, scoreThreshold: null };
 
   // For Workbench notebooks, build a chatFn that routes through the backend.
+  // Always create a fresh conversation — same reasoning as the notes route.
   let chatFn: ChatFn | undefined;
+  let podcastTempConvId: string | null = null;
   if (notebook.rag_backend === "workbench") {
-    // Use the first conversation's agent + workbench conversation ID for scripting.
-    const conv = db
-      .prepare("SELECT * FROM conversations WHERE notebook_id = ? ORDER BY created_at ASC LIMIT 1")
-      .get(id) as Conversation | undefined;
     const rag = getBackend("workbench");
+    const { conversationId } = await rag.createConversation({ notebook, agentId: workbenchAgentId });
+    podcastTempConvId = conversationId;
     chatFn = async (args) => {
       return rag.chat({
         prompt: args.prompt,
         notebook,
-        workbenchAgentId: conv?.workbench_agent_id,
-        workbenchConversationId: conv?.workbench_conversation_id,
+        workbenchConversationId: conversationId,
       });
     };
   }
@@ -148,6 +148,11 @@ export async function POST(
         err instanceof Error ? err.message : String(err),
         podcastId,
       );
+    } finally {
+      // Clean up the temporary Workbench conversation if we created one for scripting.
+      if (podcastTempConvId && notebook.rag_backend === "workbench") {
+        try { await getBackend("workbench").deleteConversation(podcastTempConvId, notebook, null); } catch { /* best-effort */ }
+      }
     }
   })();
 

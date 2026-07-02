@@ -117,7 +117,7 @@ export interface RagBackend {
   deleteNotebookResources(args: DeleteResourcesArgs): Promise<void>;
 
   /** Create a conversation on the backend (Workbench only; OpenRAG is a no-op). */
-  createConversation(args: CreateConversationArgs): Promise<{ conversationId: string | null }>;
+  createConversation(args: CreateConversationArgs): Promise<{ conversationId: string }>;
 
   /** Delete a conversation on the backend. */
   deleteConversation(conversationId: string, notebook: Notebook, agentId?: string | null): Promise<void>;

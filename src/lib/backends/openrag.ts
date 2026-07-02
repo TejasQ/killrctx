@@ -104,8 +104,9 @@ export const openragBackend: RagBackend = {
 
   async createConversation(_args: CreateConversationArgs) {
     // OpenRAG doesn't have a conversation resource — threading is implicit
-    // via chatId. Return null so the caller knows there's nothing to store.
-    return { conversationId: null };
+    // via chatId. Return an empty string so the interface signature is satisfied;
+    // OpenRAG callers never use this value.
+    return { conversationId: "" };
   },
 
   async deleteConversation(conversationId: string, _notebook: Notebook, _agentId?: string | null) {

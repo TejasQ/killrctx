@@ -542,6 +542,9 @@ export default function NotebookPage({
               ? documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.filename)
               : []
           }
+          activeConvAgentId={
+            conversations.find((c) => c.id === activeConvId)?.workbench_agent_id ?? null
+          }
         />
       </div>
     </div>
@@ -1873,6 +1876,7 @@ function StudioPanel({
   onToggle,
   onResizeDrag,
   selectedFilenames,
+  activeConvAgentId,
 }: {
   notebookId: string;
   notes: Note[];
@@ -1886,6 +1890,8 @@ function StudioPanel({
   onResizeDrag: (startX: number) => void;
   /** Filenames checked in Sources panel; empty = use all notebook docs. */
   selectedFilenames: string[];
+  /** Workbench agent ID from the active conversation; null for OpenRAG notebooks. */
+  activeConvAgentId: string | null;
 }) {
   // Which type card is currently selected (null = grid only, no generate panel).
   const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
@@ -1927,6 +1933,8 @@ function StudioPanel({
             topic: capturedTopic,
             // Only send when non-empty — the route treats absence as "all docs".
             ...(selectedFilenames.length > 0 && { selectedFilenames }),
+            // Pass the active conversation's agent so the route uses the right one.
+            ...(activeConvAgentId && { workbenchAgentId: activeConvAgentId }),
           }),
         });
 

@@ -118,14 +118,17 @@ export const workbenchBackend: RagBackend = {
     if (!convId) throw new Error("Workbench chatStream requires a conversation ID");
 
     const url = wsPath(`/agents/${agentId}/conversations/${convId}/messages/stream`);
+    console.log(`[workbench] POST ${url}`);
     const res = await fetch(url, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify({ content: args.prompt }),
     });
 
+    console.log(`[workbench] chatStream response status: ${res.status}`);
     if (!res.ok) {
       const body = await res.text();
+      console.error(`[workbench] chatStream error body: ${body}`);
       throw new Error(`Workbench stream failed (${res.status}): ${body}`);
     }
 
@@ -327,6 +330,7 @@ export const workbenchBackend: RagBackend = {
     const kbId = args.notebook.workbench_kb_id;
 
     const url = wsPath(`/agents/${agentId}/conversations`);
+    console.log(`[workbench] createConversation POST ${url} kbId=${kbId ?? "none"}`);
     const res = await fetch(url, {
       method: "POST",
       headers: headers(),
@@ -336,12 +340,15 @@ export const workbenchBackend: RagBackend = {
       }),
     });
 
+    console.log(`[workbench] createConversation response status: ${res.status}`);
     if (!res.ok) {
       const body = await res.text();
+      console.error(`[workbench] createConversation error body: ${body}`);
       throw new Error(`Workbench conversation creation failed (${res.status}): ${body}`);
     }
 
     const data = (await res.json()) as { conversationId: string };
+    console.log(`[workbench] createConversation created: ${data.conversationId}`);
     return { conversationId: data.conversationId };
   },
 

@@ -674,17 +674,23 @@ function SourcesPanel({
   const [addingUrl, setAddingUrl] = useState(false);
   const [urlValue, setUrlValue] = useState("");
 
-  // File types confirmed to work with Docling ingest. Used for the file
-  // picker's accept attribute and to reject unsupported files before they
-  // hit the server. Based on the Docling InputFormat enum, minus formats
-  // that either errored in practice (gif) or require special pipeline
-  // configuration we don't have (audio/asr, obscure XML patent formats).
-  const SUPPORTED_EXTENSIONS = new Set([
+  // File types accepted by each backend. Workbench advertises:
+  //   "Text, Markdown, JSON, CSV, source code, plus PDF, DOCX, and XLSX up to 25 MB each."
+  // OpenRAG/Docling accepts a broader set — based on the Docling InputFormat
+  // enum, minus formats that errored in practice (gif) or need special pipeline
+  // config (audio/asr, obscure XML patent formats).
+  const OPENRAG_EXTENSIONS = new Set([
     ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
     ".md", ".html", ".txt", ".asciidoc",
     ".png", ".jpg", ".jpeg", ".webp", ".tiff",
     ".latex", ".tex",
   ]);
+  const WORKBENCH_EXTENSIONS = new Set([
+    ".pdf", ".docx", ".xlsx",
+    ".txt", ".md", ".json", ".jsonl", ".csv",
+  ]);
+  const SUPPORTED_EXTENSIONS =
+    ragBackend === "workbench" ? WORKBENCH_EXTENSIONS : OPENRAG_EXTENSIONS;
   const ACCEPT = [...SUPPORTED_EXTENSIONS].join(",");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Selection state is lifted to page level so ChatPanel and StudioPanel can
@@ -726,6 +732,10 @@ function SourcesPanel({
   // request, so we loop here rather than batching multipart on the server.
   // Sequential (not parallel) keeps Docling/embedding load predictable on
   // the OpenRAG side and gives us a clean "n of m" progress indicator.
+  // The Workbench UI states: "PDF, DOCX, and XLSX up to 25 MB each."
+  // Use that advertised limit as our client-side ceiling.
+  const WORKBENCH_MAX_BYTES = 25 * 1024 * 1024;
+
   async function upload(files: File[]) {
     if (files.length === 0) return;
     setError(null);
@@ -740,6 +750,18 @@ function SourcesPanel({
         `Unsupported file type${unsupported.length > 1 ? "s" : ""}: ${unsupported.map((f) => f.name).join(", ")}`,
       );
       return;
+    }
+
+    // Workbench has a hard 50 MB per-file limit. Reject oversized files now
+    // so the user gets a clear message instead of a cryptic 413 from the API.
+    if (ragBackend === "workbench") {
+      const tooBig = files.filter((f) => f.size > WORKBENCH_MAX_BYTES);
+      if (tooBig.length > 0) {
+        setError(
+          `File${tooBig.length > 1 ? "s" : ""} too large for Workbench (max 25 MB): ${tooBig.map((f) => f.name).join(", ")}`,
+        );
+        return;
+      }
     }
 
     // Check for duplicates before starting. If any selected files share a
@@ -934,11 +956,26 @@ function SourcesPanel({
             // (e.g. "heroes/Raven.pdf"). The API route strips the path to just
             // the basename before passing it to OpenRAG, so we only need to
             // filter here using the basename.
-            const files = raw.filter((f) => {
+            let files = raw.filter((f) => {
               const basename = f.name.split("/").pop() ?? f.name;
               const ext = "." + basename.split(".").pop()?.toLowerCase();
               return SUPPORTED_EXTENSIONS.has(ext);
             });
+            // Workbench: silently drop files over 50 MB from folder picks,
+            // then warn the user how many were skipped.
+            if (ragBackend === "workbench") {
+              const skipped = files.filter((f) => f.size > WORKBENCH_MAX_BYTES);
+              files = files.filter((f) => f.size <= WORKBENCH_MAX_BYTES);
+              if (skipped.length > 0) {
+                setError(
+                  `${skipped.length} file${skipped.length > 1 ? "s" : ""} skipped — too large for Workbench (max 25 MB): ${skipped.map((f) => f.name.split("/").pop()).join(", ")}`,
+                );
+                if (files.length === 0) {
+                  if (folderInputRef.current) folderInputRef.current.value = "";
+                  return;
+                }
+              }
+            }
             if (folderInputRef.current) folderInputRef.current.value = "";
             if (raw.length > 0 && files.length === 0) {
               setError("No supported files found in the selected folder.");

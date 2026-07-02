@@ -227,6 +227,16 @@ export const workbenchBackend: RagBackend = {
 
     if (!res.ok) {
       const body = await res.text();
+      // 413 means the file exceeded the Workbench's per-route size ceiling.
+      // Parse the structured error when possible so we can give a clean message.
+      if (res.status === 413) {
+        let hint = "The file is too large for the Workbench to ingest.";
+        try {
+          const parsed = JSON.parse(body) as { error?: { message?: string } };
+          if (parsed.error?.message) hint = parsed.error.message;
+        } catch { /* leave default hint */ }
+        throw new Error(`File too large — ${hint}`);
+      }
       throw new Error(`Workbench file ingest failed (${res.status}): ${body}`);
     }
 

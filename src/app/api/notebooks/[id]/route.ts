@@ -177,7 +177,20 @@ export async function PATCH(
     return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
 
+  // Workbench Knowledge Base names are immutable after creation — the Workbench
+  // API does not support renaming a KB. Only update the local SQLite title.
+  // For OpenRAG notebooks, propagate the rename to the filter best-effort.
   db.prepare("UPDATE notebooks SET title = ? WHERE id = ?").run(trimmed, id);
+
+  if (notebook.rag_backend !== "workbench") {
+    try {
+      const rag = getBackend(notebook.rag_backend ?? "openrag");
+      await rag.renameNotebookResources({ notebook, newTitle: trimmed });
+    } catch {
+      // OpenRAG unreachable — filter name will drift, but that's cosmetic.
+    }
+  }
+
   const updated = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook;

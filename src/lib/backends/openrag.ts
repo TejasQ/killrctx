@@ -20,6 +20,7 @@ import type {
   StreamDelta,
   NotebookResources,
   CreateResourcesArgs,
+  RenameResourcesArgs,
   DeleteResourcesArgs,
   CreateConversationArgs,
 } from "../rag";
@@ -87,6 +88,12 @@ export const openragBackend: RagBackend = {
   async createNotebookResources(args: CreateResourcesArgs): Promise<NotebookResources> {
     const { filterId, filterName } = await openrag.createFilter(args.notebookTitle);
     return { resourceId: filterId, resourceName: filterName };
+  },
+
+  async renameNotebookResources(args: RenameResourcesArgs) {
+    if (args.notebook.openrag_filter_id) {
+      await openrag.renameFilter(args.notebook.openrag_filter_id, args.newTitle);
+    }
   },
 
   async deleteNotebookResources(args: DeleteResourcesArgs) {

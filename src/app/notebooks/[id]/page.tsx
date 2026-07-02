@@ -333,6 +333,9 @@ export default function NotebookPage({
             />
             <InlineTitle
               title={notebook.title}
+              // Workbench KB names are immutable after creation — the Astra
+              // collection name is set at KB creation time and cannot be changed.
+              readonly={notebook.rag_backend === "workbench"}
               onSave={async (newTitle) => {
                 const res = await fetch(`/api/notebooks/${id}`, {
                   method: "PATCH",
@@ -2446,9 +2449,14 @@ function StatusPill({ status }: { status: PodcastStatus | null }) {
 // ============================================================================
 function InlineTitle({
   title,
+  readonly = false,
   onSave,
 }: {
   title: string;
+  /** When true, the title is display-only — clicking it shows a tooltip
+   *  instead of opening an edit field. Used for Workbench notebooks whose
+   *  KB name is immutable after creation. */
+  readonly?: boolean;
   onSave: (newTitle: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -2480,6 +2488,18 @@ function InlineTitle({
   function cancel() {
     setDraft(title);
     setEditing(false);
+  }
+
+  // Readonly: plain text with a tooltip explaining why it can't be renamed.
+  if (readonly) {
+    return (
+      <span
+        title="AI Workbench Knowledge Base names cannot be changed after creation"
+        className="px-1 text-base font-medium cursor-default"
+      >
+        {title}
+      </span>
+    );
   }
 
   if (editing) {

@@ -308,6 +308,12 @@ export const workbenchBackend: RagBackend = {
     return { resourceId: data.knowledgeBaseId, resourceName: data.name };
   },
 
+  async renameNotebookResources() {
+    // Workbench Knowledge Base names are immutable after creation.
+    // This method is required by the RagBackend interface but is intentionally
+    // a no-op — the route layer skips calling it for workbench notebooks.
+  },
+
   async deleteNotebookResources(args: DeleteResourcesArgs) {
     const kbId = args.notebook.workbench_kb_id;
     if (!kbId) return;

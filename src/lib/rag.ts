@@ -75,6 +75,12 @@ export type DeleteResourcesArgs = {
   notebook: Notebook;
 };
 
+/** Arguments for renaming notebook resources. */
+export type RenameResourcesArgs = {
+  notebook: Notebook;
+  newTitle: string;
+};
+
 /** Arguments for creating a conversation. */
 export type CreateConversationArgs = {
   notebook: Notebook;
@@ -103,6 +109,9 @@ export interface RagBackend {
 
   /** Create backend resources when a new notebook is created. */
   createNotebookResources(args: CreateResourcesArgs): Promise<NotebookResources>;
+
+  /** Rename backend resources when a notebook is renamed. Best-effort — callers swallow errors. */
+  renameNotebookResources(args: RenameResourcesArgs): Promise<void>;
 
   /** Delete backend resources when a notebook is deleted. */
   deleteNotebookResources(args: DeleteResourcesArgs): Promise<void>;

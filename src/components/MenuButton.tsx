@@ -29,6 +29,10 @@ export type MenuAction = {
   onClick: () => void;
   /** Visual variant: "danger" tints the row red (delete actions). */
   variant?: "default" | "danger";
+  /** When true the item is shown but not clickable. */
+  disabled?: boolean;
+  /** Tooltip shown on hover (useful for disabled items to explain why). */
+  title?: string;
 };
 
 export default function MenuButton({
@@ -89,16 +93,21 @@ export default function MenuButton({
             <button
               key={a.label}
               role="menuitem"
+              disabled={a.disabled}
+              title={a.title}
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (a.disabled) return;
                 setOpen(false);
                 a.onClick();
               }}
               className={`block w-full px-3 py-1.5 text-left ${
-                a.variant === "danger"
-                  ? "text-red-300 hover:bg-red-950/40"
-                  : "hover:bg-edge"
+                a.disabled
+                  ? "cursor-not-allowed opacity-40"
+                  : a.variant === "danger"
+                    ? "text-red-300 hover:bg-red-950/40"
+                    : "hover:bg-edge"
               }`}
             >
               {a.label}

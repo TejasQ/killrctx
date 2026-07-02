@@ -118,6 +118,11 @@ export default function Home() {
             {creating ? "Creating…" : "Create"}
           </button>
         </div>
+        {ragBackend === "workbench" && (
+          <p className="text-xs text-muted">
+            AI Workbench notebook names are permanent — the Astra collection name is set at creation and cannot be changed.
+          </p>
+        )}
       </form>
 
       <ul className="grid gap-3">
@@ -154,10 +159,17 @@ export default function Home() {
               <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition group-hover:opacity-100">
                 <MenuButton
                   actions={[
-                    {
-                      label: "Rename",
-                      onClick: () => setRenamingId(nb.id),
-                    },
+                    nb.rag_backend === "workbench"
+                      ? {
+                          label: "Rename",
+                          disabled: true,
+                          title: "AI Workbench Knowledge Base names cannot be changed after creation",
+                          onClick: () => {},
+                        }
+                      : {
+                          label: "Rename",
+                          onClick: () => setRenamingId(nb.id),
+                        },
                     {
                       label: "Delete notebook",
                       variant: "danger",

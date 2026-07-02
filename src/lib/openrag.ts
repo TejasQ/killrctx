@@ -293,6 +293,16 @@ export async function deleteFilter(filterId: string): Promise<void> {
 }
 
 /**
+ * Rename a knowledge filter in OpenRAG.
+ *
+ * Only updates the name — leaves queryData and description untouched.
+ * Best-effort; callers swallow errors so the SQLite rename always succeeds.
+ */
+export async function renameFilter(filterId: string, name: string): Promise<void> {
+  await getClient().knowledgeFilters.update(filterId, { name });
+}
+
+/**
  * Update the icon and color of a knowledge filter in OpenRAG.
  *
  * We spread the existing queryData and override only icon+color so the

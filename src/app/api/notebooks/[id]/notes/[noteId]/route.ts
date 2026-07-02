@@ -84,8 +84,19 @@ const NOTE_PROMPTS: Record<NoteType, string> = {
     "  Numbered lists (1. 2. 3.) for detail points. Place them under the most specific heading they belong to.\n" +
     "Use only the H1 title, headings, and numbered list items — no prose paragraphs, no bullet points.",
   qa:
-    "Generate a list of question-and-answer pairs covering the key facts in the sources. " +
-    "Format each pair as:\n**Q: ...?**\nA: ...",
+    "Generate a comprehensive set of question-and-answer pairs that test understanding of the key facts in the sources.\n\n" +
+    "Output format — follow this exactly, no deviations:\n\n" +
+    "**Q: <question text>?**\n" +
+    "A: <answer text>\n\n" +
+    "**Q: <next question>?**\n" +
+    "A: <next answer>\n\n" +
+    "Rules:\n" +
+    "- Every question line must start with **Q:** (bold) and end with ?\n" +
+    "- Every answer line must start with A: (plain)\n" +
+    "- Leave exactly one blank line between each pair\n" +
+    "- Answers should be 1–3 sentences: concise but complete\n" +
+    "- Cover basic facts, key relationships, and notable specifics\n" +
+    "- No prose, no headings, no numbered prefixes, no text outside the Q/A pairs",
 };
 
 /**

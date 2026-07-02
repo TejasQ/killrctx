@@ -1520,6 +1520,120 @@ function OutlineRenderer({ content, topic }: { content: string; topic?: string |
 }
 
 
+// ============================================================================
+// QARenderer — styled renderer for Q&A notes
+// ============================================================================
+//
+// _Basically_, the LLM produces numbered Q&A pairs in this format:
+//
+//   **1.** **Q: What is X?**
+//   A: Y is Z.
+//
+// Generic ReactMarkdown would render the bold Q as inline text inside a
+// paragraph, losing the visual separation between question and answer.
+// Instead we parse the raw content into { number, question, answer } triples
+// and render each as a card: numbered pill + bold question in a tinted header,
+// plain answer below. This makes pairs scannable at a glance.
+//
+// Parsing is lenient: it accepts "**Q:**", "Q:", bold or plain question lines,
+// and both "A:" and "**A:**" prefixes so the renderer handles minor LLM drift
+// in format without breaking.
+// ============================================================================
+
+type QAPair = { number: number; question: string; answer: string };
+
+// parseQAPairs — splits raw LLM text into an array of { number, question, answer }.
+// Returns an empty array if the content doesn't look like Q&A output (falls
+// back to generic markdown rendering in that case).
+//
+// The target format is **Q: ...?** / A: ... pairs separated by blank lines.
+// In practice OpenRAG's agent is lenient about following format instructions
+// so the parser handles the common drift cases:
+//   - bold or plain Q:  →  **Q: ...** or Q: ...
+//   - bold or plain A:  →  **A: ...** or A: ...
+//   - stray number prefixes on their own line before the Q line (e.g. **1.**)
+//   - number + Q on the same line (e.g. "1. **Q: ...**")
+//
+// Strategy: split on blank lines to get one chunk per pair, then scan each
+// chunk for the first line that contains "Q:" and the first that contains "A:".
+// We assign sequential numbers ourselves so the prompt never needs to.
+function parseQAPairs(raw: string): QAPair[] {
+  const pairs: QAPair[] = [];
+  const cleaned = fixMarkdown(raw).trim();
+
+  // Split on one or more blank lines to isolate each Q/A block.
+  const chunks = cleaned.split(/\n{2,}/);
+
+  for (const chunk of chunks) {
+    const lines = chunk.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) continue;
+
+    // Find the line that carries the question (contains "Q:" anywhere).
+    const qLine = lines.find((l) => /Q:/i.test(l));
+    if (!qLine) continue;
+
+    // Find the line that carries the answer (contains "A:" anywhere, after the Q line).
+    const qIdx = lines.indexOf(qLine);
+    const aLine = lines.slice(qIdx + 1).find((l) => /^(\*{0,2}A:\*{0,2}|A:)/i.test(l));
+    if (!aLine) continue;
+
+    // Extract question text: strip leading bold/number junk, then the "Q:" prefix.
+    const question = qLine
+      .replace(/^\*{1,2}\d+\.\*{1,2}\s*/, "")   // **1.** prefix
+      .replace(/^\d+\.\s*/, "")                   // plain 1. prefix
+      .replace(/^\*{0,2}Q:\*{0,2}\s*/i, "")       // **Q:** or Q:
+      .replace(/\*+$/, "")                         // trailing bold markers
+      .trim();
+
+    // Extract answer text: strip the "A:" prefix.
+    const answer = aLine
+      .replace(/^\*{0,2}A:\*{0,2}\s*/i, "")
+      .trim();
+
+    if (!question || !answer) continue;
+
+    pairs.push({ number: pairs.length + 1, question, answer });
+  }
+
+  return pairs;
+}
+
+function QARenderer({ content, topic }: { content: string; topic?: string | null }) {
+  const pairs = parseQAPairs(content);
+
+  // If parsing produced nothing (unexpected format), fall back to plain markdown.
+  if (pairs.length === 0) {
+    return (
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {fixMarkdown(content)}
+      </ReactMarkdown>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {topic && (
+        <p className="text-xs text-muted">Focus: {topic}</p>
+      )}
+      {pairs.map((pair) => (
+        <div key={pair.number} className="rounded-lg border border-edge overflow-hidden">
+          {/* Question row — indigo-tinted header matches the Q&A card color */}
+          <div className="flex items-start gap-2.5 bg-indigo-500/[0.08] px-3 py-2.5">
+            <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-500/30 text-[10px] font-bold text-indigo-200">
+              {pair.number}
+            </span>
+            <p className="text-sm font-semibold text-white leading-snug">{pair.question}</p>
+          </div>
+          {/* Answer row */}
+          <div className="px-3 py-2.5 text-sm text-zinc-300 leading-relaxed">
+            {pair.answer}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ChatPanel — middle column
 // ============================================================================
 // The conversation. A header bar lets the user pick a prior conversation or
@@ -2116,6 +2230,8 @@ function StudioPanel({
         ) : expandedNote.content ? (
           expandedNote.type === "outline" ? (
             <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
+          ) : expandedNote.type === "qa" ? (
+            <QARenderer content={expandedNote.content} topic={expandedNote.topic} />
           ) : (
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
               {fixMarkdown(expandedNote.content)}
@@ -2347,6 +2463,7 @@ function NoteCard({
   function NoteContent({ inFullscreen }: { inFullscreen: boolean }) {
     if (!note.content) return <p className="text-xs text-muted">No content yet.</p>;
     if (note.type === "outline") return <OutlineRenderer content={note.content} topic={note.topic} />;
+    if (note.type === "qa") return <QARenderer content={note.content} topic={note.topic} />;
     if (note.type === "mindmap") {
       return (
         <MindMapRenderer

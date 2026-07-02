@@ -102,14 +102,9 @@ export default function Home() {
             placeholder="New notebook title"
             className="flex-1 rounded-lg border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-accent"
           />
-          <select
-            value={ragBackend}
-            onChange={(e) => setRagBackend(e.target.value as "openrag" | "workbench")}
-            className="rounded-lg border border-edge bg-panel px-2 py-2 text-xs"
-          >
-            <option value="openrag">OpenRAG</option>
-            <option value="workbench">AI Workbench</option>
-          </select>
+          {/* Backend picker: two logo-labelled toggle buttons instead of a plain select,
+              so users can see the platform brand at a glance. */}
+          <BackendPicker value={ragBackend} onChange={setRagBackend} />
           <button
             disabled={creating}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
@@ -229,6 +224,51 @@ function RenameInput({
         className="w-full rounded border border-accent bg-transparent text-sm font-medium outline-none"
       />
       <div className="mt-0.5 text-xs text-muted">Enter to save · Esc to cancel</div>
+    </div>
+  );
+}
+
+// ============================================================================
+// BackendPicker — logo-labelled toggle buttons for choosing the RAG backend
+// ============================================================================
+// Two side-by-side buttons, each showing the platform logo + name. The active
+// choice gets an accent border; the inactive one stays subdued. This replaces
+// a plain <select> so users can see the brand at a glance.
+// ============================================================================
+const BACKEND_OPTIONS = [
+  { value: "openrag",   label: "OpenRAG",     logo: "/assets/logo-openrag-dog.svg" },
+  { value: "workbench", label: "AI Workbench", logo: "/assets/logo-astra.png" },
+] as const;
+
+function BackendPicker({
+  value,
+  onChange,
+}: {
+  value: "openrag" | "workbench";
+  onChange: (v: "openrag" | "workbench") => void;
+}) {
+  return (
+    <div className="flex rounded-lg border border-edge overflow-hidden">
+      {BACKEND_OPTIONS.map((opt) => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={[
+              "flex items-center gap-1.5 px-2.5 py-2 text-xs transition",
+              active
+                ? "bg-accent/10 border-accent text-accent font-medium ring-1 ring-inset ring-accent"
+                : "bg-panel text-muted hover:bg-surface",
+            ].join(" ")}
+            title={opt.label}
+          >
+            <img src={opt.logo} alt={opt.label} width={16} height={16} className="shrink-0 rounded-sm" />
+            {opt.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -82,6 +82,22 @@ function isTextFile(filename: string): boolean {
   return TEXT_EXTENSIONS.has(ext);
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * List all documents in a Knowledge Base.
+ * Returns an empty array if the KB is unreachable or the request fails.
+ */
+export async function listKbDocuments(
+  kbId: string,
+): Promise<{ documentId: string; sourceFilename: string }[]> {
+  const url = wsPath(`/knowledge-bases/${kbId}/documents`);
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { items: { documentId: string; sourceFilename: string }[] };
+  return data.items;
+}
+
 // ─── Implementation ──────────────────────────────────────────────────────────
 
 export const workbenchBackend: RagBackend = {
@@ -275,12 +291,8 @@ export const workbenchBackend: RagBackend = {
     if (!kbId) return;
 
     // Find the document by filename, then delete it.
-    const listUrl = wsPath(`/knowledge-bases/${kbId}/documents`);
-    const res = await fetch(listUrl, { headers: headers() });
-    if (!res.ok) return;
-
-    const data = (await res.json()) as { items: { documentId: string; sourceFilename: string }[] };
-    const doc = data.items.find((d) => d.sourceFilename === filename);
+    const items = await listKbDocuments(kbId);
+    const doc = items.find((d) => d.sourceFilename === filename);
     if (!doc) return;
 
     const delUrl = wsPath(`/knowledge-bases/${kbId}/documents/${doc.documentId}`);

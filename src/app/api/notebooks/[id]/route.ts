@@ -18,6 +18,8 @@ import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation, MindMapLink } from "@/lib/db";
 import { getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
 import { getBackend } from "@/lib/rag";
+import { listKbDocuments } from "@/lib/backends/workbench";
+import { v4 as uuid } from "uuid";
 
 export const runtime = "nodejs";
 
@@ -102,6 +104,30 @@ export async function GET(
         }
       })();
     }
+  }
+
+  // Fire-and-forget: insert any KB docs not yet in SQLite so files ingested
+  // directly via the Workbench UI show up on the next refresh (REQ-001).
+  if (notebook.rag_backend === "workbench" && notebook.workbench_kb_id) {
+    void (async () => {
+      try {
+        const kbDocs = await listKbDocuments(notebook.workbench_kb_id!);
+        const known = new Set(
+          (db.prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+            .all(id) as { filename: string }[]).map((r) => r.filename),
+        );
+        for (const { sourceFilename } of kbDocs) {
+          if (!known.has(sourceFilename)) {
+            db.prepare(
+              `INSERT INTO documents (id, notebook_id, filename, bytes, ingest_status, created_at)
+               VALUES (?, ?, ?, 0, 'ready', ?)`,
+            ).run(uuid(), id, sourceFilename, Date.now());
+          }
+        }
+      } catch {
+        // Workbench unreachable — serve what SQLite already has.
+      }
+    })();
   }
 
   // Fetch the filter's current icon and color from OpenRAG inline so the

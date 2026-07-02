@@ -16,7 +16,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import db, { Notebook, Document, Message, Note, Conversation, MindMapLink } from "@/lib/db";
-import { getTaskStatus, getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getFilterMeta, deleteFilter, deleteDocument, deleteConversation, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
+import { listKbDocuments } from "@/lib/backends/workbench";
+import { v4 as uuid } from "uuid";
 
 export const runtime = "nodejs";
 
@@ -73,22 +76,21 @@ export async function GET(
     .all(id) as MindMapLink[];
 
   // For each document still marked 'indexing', fire a background status check
-  // against OpenRAG and update SQLite so the next poll sees the new state.
-  // Void — we don't wait for these; the client will pick up the result on its
-  // next 3s refresh. Same fire-and-forget pattern as podcast generation.
+  // against the notebook's configured backend and update SQLite so the next
+  // poll sees the new state. Void — we don't wait for these; the client will
+  // pick up the result on its next 3s refresh.
   for (const doc of documents) {
     if (doc.ingest_status === "indexing" && doc.openrag_id) {
       void (async () => {
         try {
-          const { status, error } = await getTaskStatus(doc.openrag_id!);
+          const rag = getBackend(notebook.rag_backend ?? "openrag");
+          const { status, error } = await rag.getTaskStatus(doc.openrag_id!, notebook);
           if (status !== "indexing") {
             db.prepare("UPDATE documents SET ingest_status = ?, ingest_error = ? WHERE id = ?")
               .run(status, error, doc.id);
-            // When a doc becomes ready, sync the filter so OpenRAG knows it exists.
-            // The POST handler schedules this too, but documents are always 'indexing'
-            // at upload time — so that sync produces an empty list. This is the
-            // call that actually adds the filename to data_sources.
-            if (status === "ready" && notebook.openrag_filter_id) {
+            // When a doc becomes ready, sync the OpenRAG filter so it knows
+            // the file exists. Workbench KBs are self-scoped — no sync needed.
+            if (status === "ready" && notebook.rag_backend !== "workbench" && notebook.openrag_filter_id) {
               scheduleSyncFilterSources(notebook.openrag_filter_id, () =>
                 (db
                   .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
@@ -98,10 +100,34 @@ export async function GET(
             }
           }
         } catch {
-          // OpenRAG unreachable — leave status as 'indexing', retry next poll.
+          // Backend unreachable — leave status as 'indexing', retry next poll.
         }
       })();
     }
+  }
+
+  // Fire-and-forget: insert any KB docs not yet in SQLite so files ingested
+  // directly via the Workbench UI show up on the next refresh (REQ-001).
+  if (notebook.rag_backend === "workbench" && notebook.workbench_kb_id) {
+    void (async () => {
+      try {
+        const kbDocs = await listKbDocuments(notebook.workbench_kb_id!);
+        const known = new Set(
+          (db.prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+            .all(id) as { filename: string }[]).map((r) => r.filename),
+        );
+        for (const { sourceFilename } of kbDocs) {
+          if (!known.has(sourceFilename)) {
+            db.prepare(
+              `INSERT INTO documents (id, notebook_id, filename, bytes, ingest_status, created_at)
+               VALUES (?, ?, ?, 0, 'ready', ?)`,
+            ).run(uuid(), id, sourceFilename, Date.now());
+          }
+        }
+      } catch {
+        // Workbench unreachable — serve what SQLite already has.
+      }
+    })();
   }
 
   // Fetch the filter's current icon and color from OpenRAG inline so the
@@ -155,11 +181,7 @@ export async function PATCH(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { title } = (await req.json()) as { title?: string };
-  const trimmed = title?.trim();
-  if (!trimmed) {
-    return NextResponse.json({ error: "title is required" }, { status: 400 });
-  }
+  const body = (await req.json()) as { title?: string; workbench_embedding_service_id?: string };
 
   const notebook = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
@@ -168,7 +190,33 @@ export async function PATCH(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  if (body.workbench_embedding_service_id !== undefined) {
+    // Update the Workbench embedding service ID stored on the notebook.
+    db.prepare("UPDATE notebooks SET workbench_embedding_service_id = ? WHERE id = ?")
+      .run(body.workbench_embedding_service_id, id);
+    const updated = db.prepare("SELECT * FROM notebooks WHERE id = ?").get(id) as Notebook;
+    return NextResponse.json({ notebook: updated });
+  }
+
+  const trimmed = body.title?.trim();
+  if (!trimmed) {
+    return NextResponse.json({ error: "title is required" }, { status: 400 });
+  }
+
+  // Workbench Knowledge Base names are immutable after creation — the Workbench
+  // API does not support renaming a KB. Only update the local SQLite title.
+  // For OpenRAG notebooks, propagate the rename to the filter best-effort.
   db.prepare("UPDATE notebooks SET title = ? WHERE id = ?").run(trimmed, id);
+
+  if (notebook.rag_backend !== "workbench") {
+    try {
+      const rag = getBackend(notebook.rag_backend ?? "openrag");
+      await rag.renameNotebookResources({ notebook, newTitle: trimmed });
+    } catch {
+      // OpenRAG unreachable — filter name will drift, but that's cosmetic.
+    }
+  }
+
   const updated = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook;
@@ -178,12 +226,14 @@ export async function PATCH(
 /**
  * DELETE /api/notebooks/[id]
  *
- * Cleans up all OpenRAG resources for the notebook (filter, document chunks,
- * chat threads from messages + notes) then drops the SQLite row. The schema's
- * `ON DELETE CASCADE` foreign keys handle child rows automatically.
+ * Cleans up all backend resources for the notebook then drops the SQLite row.
+ * The schema's `ON DELETE CASCADE` foreign keys handle child rows automatically.
  *
- * All OpenRAG deletions run in parallel via Promise.allSettled — failures are
- * swallowed so the SQLite delete always fires even when OpenRAG is unreachable.
+ * - OpenRAG: deletes filter, document chunks, and chat threads.
+ * - Workbench: deletes the Knowledge Base (cascades documents + collection).
+ *
+ * All deletions run in parallel via Promise.allSettled — failures are
+ * swallowed so the SQLite delete always fires even when the backend is down.
  */
 export async function DELETE(
   _: Request,
@@ -196,34 +246,51 @@ export async function DELETE(
     .get(id) as Notebook | undefined;
 
   if (notebook) {
-    const documents = db
-      .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
-      .all(id) as Pick<Document, "filename">[];
-
-    // Collect every response_id that represents an OpenRAG chat thread —
-    // both message threads (one per conversation) and note threads.
-    const msgResponseIds = db
-      .prepare(
-        `SELECT DISTINCT response_id FROM messages
-         WHERE notebook_id = ? AND response_id IS NOT NULL`,
-      )
-      .all(id) as { response_id: string }[];
-    const noteResponseIds = db
-      .prepare(
-        "SELECT response_id FROM notes WHERE notebook_id = ? AND response_id IS NOT NULL",
-      )
-      .all(id) as { response_id: string }[];
-
     const cleanupTasks: Promise<unknown>[] = [];
 
-    if (notebook.openrag_filter_id) {
-      cleanupTasks.push(deleteFilter(notebook.openrag_filter_id));
-    }
-    for (const { filename } of documents) {
-      cleanupTasks.push(deleteDocument(filename));
-    }
-    for (const { response_id } of [...msgResponseIds, ...noteResponseIds]) {
-      cleanupTasks.push(deleteConversation(response_id));
+    if (notebook.rag_backend === "workbench") {
+      // ── Workbench path: deleting the KB cascades documents + chunks ──
+      const rag = getBackend("workbench");
+      cleanupTasks.push(rag.deleteNotebookResources({ notebook }));
+
+      // Also delete conversations on the Workbench side.
+      const convos = db
+        .prepare("SELECT workbench_conversation_id, workbench_agent_id FROM conversations WHERE notebook_id = ?")
+        .all(id) as { workbench_conversation_id: string | null; workbench_agent_id: string | null }[];
+      for (const c of convos) {
+        if (c.workbench_conversation_id) {
+          cleanupTasks.push(
+            rag.deleteConversation(c.workbench_conversation_id, notebook, c.workbench_agent_id),
+          );
+        }
+      }
+    } else {
+      // ── OpenRAG path: clean up filter, doc chunks, and chat threads ──
+      const documents = db
+        .prepare("SELECT filename FROM documents WHERE notebook_id = ?")
+        .all(id) as Pick<Document, "filename">[];
+
+      const msgResponseIds = db
+        .prepare(
+          `SELECT DISTINCT response_id FROM messages
+           WHERE notebook_id = ? AND response_id IS NOT NULL`,
+        )
+        .all(id) as { response_id: string }[];
+      const noteResponseIds = db
+        .prepare(
+          "SELECT response_id FROM notes WHERE notebook_id = ? AND response_id IS NOT NULL",
+        )
+        .all(id) as { response_id: string }[];
+
+      if (notebook.openrag_filter_id) {
+        cleanupTasks.push(deleteFilter(notebook.openrag_filter_id));
+      }
+      for (const { filename } of documents) {
+        cleanupTasks.push(deleteDocument(filename));
+      }
+      for (const { response_id } of [...msgResponseIds, ...noteResponseIds]) {
+        cleanupTasks.push(deleteConversation(response_id));
+      }
     }
 
     // allSettled — never throws; we don't care which individual steps failed.

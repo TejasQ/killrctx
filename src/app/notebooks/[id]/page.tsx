@@ -44,7 +44,7 @@ import Spinner from "@/components/Spinner";
 // would throw and silently swallow the content panel.
 const MindMapRenderer = dynamic(() => import("@/components/MindMapRenderer"), { ssr: false });
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
-import ModelPickerPopover from "@/components/ModelPickerPopover";
+import ModelPickerPopover, { type PickerSaveResult } from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
 import SourceCitation from "@/components/SourceCitation";
 import type { Source } from "openrag-sdk";
@@ -52,9 +52,9 @@ import type { MindMapLink } from "@/lib/db";
 
 // Row shapes returned by /api/notebooks/[id]. These mirror the SQLite types
 // in lib/db.ts but only include fields the client actually uses.
-type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null };
+type Notebook = { id: string; title: string; openrag_collection: string; openrag_filter_id: string | null; openrag_filter_name: string | null; openrag_filter_icon: string | null; openrag_filter_color: string | null; rag_backend: "openrag" | "workbench"; workbench_kb_id: string | null; workbench_embedding_service_id: string | null };
 type Document = { id: string; filename: string; bytes: number; mimetype: string | null; ingest_status: "indexing" | "ready" | "failed"; ingest_error: string | null };
-type Conversation = { id: string; notebook_id: string; title: string; created_at: number };
+type Conversation = { id: string; notebook_id: string; title: string; created_at: number; workbench_agent_id: string | null };
 type Message = { id: string; conversation_id: string | null; role: "user" | "assistant"; content: string; sources_json: string | null };
 type Note = {
   id: string;
@@ -81,6 +81,12 @@ export default function NotebookPage({
   const [documents, setDocuments] = useState<Document[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // Display names for Workbench IDs. Populated once on first load of a workbench
+  // notebook; updated optimistically when the user picks a new agent/service.
+  const [wbNames, setWbNames] = useState<{ agents: Map<string,string>; embeddings: Map<string,string> }>({
+    agents: new Map(),
+    embeddings: new Map(),
+  });
   const [messages, setMessages] = useState<Message[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [mindMapLinks, setMindMapLinks] = useState<MindMapLink[]>([]);
@@ -167,6 +173,28 @@ export default function NotebookPage({
     setMessages(data.messages);
     setNotes(data.notes);
     setMindMapLinks(data.mindMapLinks ?? []);
+
+    // For Workbench notebooks, fetch agent and embedding-service names once so
+    // the pickers can show "llama-3-70b" instead of "e5a643ad-8fae-…".
+    if (data.notebook?.rag_backend === "workbench") {
+      setWbNames((prev) => {
+        // Only fetch if the maps are still empty (first load).
+        if (prev.agents.size > 0 || prev.embeddings.size > 0) return prev;
+        void Promise.all([
+          fetch("/api/workbench/agents").then((r) => r.json()).catch(() => ({ items: [] })),
+          fetch("/api/workbench/embedding-services").then((r) => r.json()).catch(() => ({ items: [] })),
+        ]).then(([agentsData, embData]) => {
+          const agents = new Map<string, string>(
+            (agentsData.items ?? []).map((a: { agentId: string; name: string }) => [a.agentId, a.name]),
+          );
+          const embeddings = new Map<string, string>(
+            (embData.items ?? []).map((e: { embeddingServiceId: string; name: string }) => [e.embeddingServiceId, e.name]),
+          );
+          setWbNames({ agents, embeddings });
+        });
+        return prev; // return unchanged until the fetch resolves
+      });
+    }
   }
 
   // frameQuestion builds the contextual question string sent to chat.
@@ -270,6 +298,17 @@ export default function NotebookPage({
     return () => clearInterval(t);
   }, [documents]);
 
+  // Poll at 500ms while a new Workbench notebook's KB is still being created.
+  // The background task in POST /api/notebooks writes workbench_kb_id once the
+  // Workbench responds. 500ms feels instant to the user but doesn't hammer the
+  // server; the interval clears itself the moment the ID arrives.
+  useEffect(() => {
+    if (notebook?.rag_backend !== "workbench") return;
+    if (notebook?.workbench_kb_id) return;
+    const t = setInterval(refresh, 500);
+    return () => clearInterval(t);
+  }, [notebook?.rag_backend, notebook?.workbench_kb_id]);
+
   if (!notebook) {
     return <div className="p-8 text-sm text-muted">Loading…</div>;
   }
@@ -282,20 +321,34 @@ export default function NotebookPage({
           <Link href="/" className="text-sm text-muted hover:text-white">
             ← Notebooks
           </Link>
-          <InlineTitle
-            title={notebook.title}
-            onSave={async (newTitle) => {
-              const res = await fetch(`/api/notebooks/${id}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ title: newTitle }),
-              });
-              if (res.ok) {
-                const { notebook: updated } = await res.json();
-                setNotebook(updated);
-              }
-            }}
-          />
+          <div className="flex items-center gap-1">
+            <img
+              src={notebook.rag_backend === "workbench"
+                ? "/assets/logo-astra.png"
+                : "/assets/logo-openrag-dog.svg"}
+              alt={notebook.rag_backend === "workbench" ? "Astra" : "OpenRAG"}
+              width={20}
+              height={20}
+              className="shrink-0"
+            />
+            <InlineTitle
+              title={notebook.title}
+              // Workbench KB names are immutable after creation — the Astra
+              // collection name is set at KB creation time and cannot be changed.
+              readonly={notebook.rag_backend === "workbench"}
+              onSave={async (newTitle) => {
+                const res = await fetch(`/api/notebooks/${id}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ title: newTitle }),
+                });
+                if (res.ok) {
+                  const { notebook: updated } = await res.json();
+                  setNotebook(updated);
+                }
+              }}
+            />
+          </div>
           {notebook.openrag_filter_name && (
             <FilterPickerPopover
               notebookId={notebook.id}
@@ -309,28 +362,79 @@ export default function NotebookPage({
           )}
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
-          {openragSettings && (
-            <ModelPickerPopover
-              kind="llm"
-              currentValue={openragSettings.llm}
-              onSaved={setOpenragSettings}
-              align="right"
-            >
-              <span title="Click to change model">
-                model:{" "}
-                <span
-                  className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
-                  style={{
-                    backgroundImage:
-                      "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+          {notebook.rag_backend === "workbench" ? (
+            // Workbench: show the agent name bound to the active conversation.
+            (() => {
+              const activeConv = conversations.find((c) => c.id === activeConvId);
+              const agentId = activeConv?.workbench_agent_id ?? "";
+              const agentLabel = wbNames.agents.get(agentId) ?? (agentId || "default");
+              return (
+                <ModelPickerPopover
+                  kind="llm"
+                  currentValue={agentId}
+                  currentLabel={agentLabel}
+                  onSaved={(result: PickerSaveResult) => {
+                    if (result.backend === "workbench" && result.kind === "llm") {
+                      setConversations((cs) =>
+                        cs.map((c) =>
+                          c.id === activeConvId ? { ...c, workbench_agent_id: result.agentId } : c,
+                        ),
+                      );
+                      // Cache the name so the trigger updates immediately.
+                      setWbNames((prev) => ({
+                        ...prev,
+                        agents: new Map(prev.agents).set(result.agentId, result.agentName),
+                      }));
+                    }
                   }}
+                  align="right"
+                  backend="workbench"
+                  notebookId={id}
+                  convId={activeConvId ?? undefined}
                 >
-                  {openragSettings.llm}
+                  <span title="Click to change agent">
+                    model:{" "}
+                    <span
+                      className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                      style={{
+                        backgroundImage:
+                          "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                      }}
+                    >
+                      {agentLabel}
+                    </span>
+                  </span>
+                </ModelPickerPopover>
+              );
+            })()
+          ) : (
+            openragSettings && (
+              <ModelPickerPopover
+                kind="llm"
+                currentValue={openragSettings.llm}
+                onSaved={(result: PickerSaveResult) => {
+                  if (result.backend === "openrag") setOpenragSettings(result.settings);
+                }}
+                align="right"
+              >
+                <span title="Click to change model">
+                  model:{" "}
+                  <span
+                    className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                    }}
+                  >
+                    {openragSettings.llm}
+                  </span>
                 </span>
-              </span>
-            </ModelPickerPopover>
+              </ModelPickerPopover>
+            )
           )}
-          <span>collection: {notebook.openrag_collection}</span>
+          {notebook.rag_backend !== "workbench" && (
+            <span>collection: {notebook.openrag_collection}</span>
+          )}
         </div>
       </header>
 
@@ -347,8 +451,30 @@ export default function NotebookPage({
           notebookId={id}
           documents={documents}
           onUploaded={refresh}
-          embeddingModel={openragSettings?.embedding ?? null}
-          onEmbeddingModelSaved={setOpenragSettings}
+          ragBackend={notebook.rag_backend}
+          embeddingModel={
+            notebook.rag_backend === "workbench"
+              ? notebook.workbench_embedding_service_id
+              : (openragSettings?.embedding ?? null)
+          }
+          embeddingLabel={
+            notebook.rag_backend === "workbench" && notebook.workbench_embedding_service_id
+              ? (wbNames.embeddings.get(notebook.workbench_embedding_service_id) ?? notebook.workbench_embedding_service_id)
+              : undefined
+          }
+          onEmbeddingModelSaved={(result: PickerSaveResult) => {
+            if (result.backend === "openrag") setOpenragSettings(result.settings);
+            else if (result.backend === "workbench" && result.kind === "embedding") {
+              setNotebook((prev) =>
+                prev ? { ...prev, workbench_embedding_service_id: result.embeddingServiceId } : prev,
+              );
+              // Cache the name so the trigger updates immediately.
+              setWbNames((prev) => ({
+                ...prev,
+                embeddings: new Map(prev.embeddings).set(result.embeddingServiceId, result.embeddingServiceName),
+              }));
+            }
+          }}
           collapsed={sourcesCollapsed}
           onToggle={() => setSourcesCollapsed((v) => !v)}
           onResizeDrag={startSourcesResize}
@@ -415,6 +541,9 @@ export default function NotebookPage({
             selectedDocIds.size > 0
               ? documents.filter((d) => selectedDocIds.has(d.id)).map((d) => d.filename)
               : []
+          }
+          activeConvAgentId={
+            conversations.find((c) => c.id === activeConvId)?.workbench_agent_id ?? null
           }
         />
       </div>
@@ -507,7 +636,9 @@ function SourcesPanel({
   notebookId,
   documents,
   onUploaded,
+  ragBackend,
   embeddingModel,
+  embeddingLabel,
   onEmbeddingModelSaved,
   collapsed,
   onToggle,
@@ -518,8 +649,10 @@ function SourcesPanel({
   notebookId: string;
   documents: Document[];
   onUploaded: () => void;
+  ragBackend: "openrag" | "workbench";
   embeddingModel: string | null;
-  onEmbeddingModelSaved: (s: import("@/components/OpenRAGContext").OpenRAGSettings) => void;
+  embeddingLabel?: string;
+  onEmbeddingModelSaved: (result: PickerSaveResult) => void;
   collapsed: boolean;
   onToggle: () => void;
   onResizeDrag: (startX: number) => void;
@@ -541,17 +674,23 @@ function SourcesPanel({
   const [addingUrl, setAddingUrl] = useState(false);
   const [urlValue, setUrlValue] = useState("");
 
-  // File types confirmed to work with Docling ingest. Used for the file
-  // picker's accept attribute and to reject unsupported files before they
-  // hit the server. Based on the Docling InputFormat enum, minus formats
-  // that either errored in practice (gif) or require special pipeline
-  // configuration we don't have (audio/asr, obscure XML patent formats).
-  const SUPPORTED_EXTENSIONS = new Set([
+  // File types accepted by each backend. Workbench advertises:
+  //   "Text, Markdown, JSON, CSV, source code, plus PDF, DOCX, and XLSX up to 25 MB each."
+  // OpenRAG/Docling accepts a broader set — based on the Docling InputFormat
+  // enum, minus formats that errored in practice (gif) or need special pipeline
+  // config (audio/asr, obscure XML patent formats).
+  const OPENRAG_EXTENSIONS = new Set([
     ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
     ".md", ".html", ".txt", ".asciidoc",
     ".png", ".jpg", ".jpeg", ".webp", ".tiff",
     ".latex", ".tex",
   ]);
+  const WORKBENCH_EXTENSIONS = new Set([
+    ".pdf", ".docx", ".xlsx",
+    ".txt", ".md", ".json", ".jsonl", ".csv",
+  ]);
+  const SUPPORTED_EXTENSIONS =
+    ragBackend === "workbench" ? WORKBENCH_EXTENSIONS : OPENRAG_EXTENSIONS;
   const ACCEPT = [...SUPPORTED_EXTENSIONS].join(",");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Selection state is lifted to page level so ChatPanel and StudioPanel can
@@ -593,6 +732,10 @@ function SourcesPanel({
   // request, so we loop here rather than batching multipart on the server.
   // Sequential (not parallel) keeps Docling/embedding load predictable on
   // the OpenRAG side and gives us a clean "n of m" progress indicator.
+  // The Workbench UI states: "PDF, DOCX, and XLSX up to 25 MB each."
+  // Use that advertised limit as our client-side ceiling.
+  const WORKBENCH_MAX_BYTES = 25 * 1024 * 1024;
+
   async function upload(files: File[]) {
     if (files.length === 0) return;
     setError(null);
@@ -607,6 +750,18 @@ function SourcesPanel({
         `Unsupported file type${unsupported.length > 1 ? "s" : ""}: ${unsupported.map((f) => f.name).join(", ")}`,
       );
       return;
+    }
+
+    // Workbench has a hard 50 MB per-file limit. Reject oversized files now
+    // so the user gets a clear message instead of a cryptic 413 from the API.
+    if (ragBackend === "workbench") {
+      const tooBig = files.filter((f) => f.size > WORKBENCH_MAX_BYTES);
+      if (tooBig.length > 0) {
+        setError(
+          `File${tooBig.length > 1 ? "s" : ""} too large for Workbench (max 25 MB): ${tooBig.map((f) => f.name).join(", ")}`,
+        );
+        return;
+      }
     }
 
     // Check for duplicates before starting. If any selected files share a
@@ -740,27 +895,37 @@ function SourcesPanel({
           ‹
         </button>
       </div>
-      {/* Row 2: embedding model picker */}
-      {embeddingModel && (
+      {/* Row 2: embedding model picker (workbench always; openrag when set) */}
+      {(ragBackend === "workbench" || embeddingModel) && (
         <div className="flex items-center border-b border-edge px-4 py-2">
-          <ModelPickerPopover
-            kind="embedding"
-            currentValue={embeddingModel}
-            onSaved={onEmbeddingModelSaved}
-          >
-            <span title="Click to change embedding model" className="text-xs text-muted">
-              model:{" "}
-              <span
-                className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
-                style={{
-                  backgroundImage:
-                    "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
-                }}
-              >
-                {embeddingModel}
+          {embeddingModel ? (
+            <ModelPickerPopover
+              kind="embedding"
+              currentValue={embeddingModel}
+              currentLabel={embeddingLabel}
+              onSaved={onEmbeddingModelSaved}
+              backend={ragBackend}
+              notebookId={notebookId}
+            >
+              <span title="Click to change embedding model" className="text-xs text-muted">
+                embed:{" "}
+                <span
+                  className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(90deg, #f87171, #fb923c, #facc15, #4ade80, #60a5fa, #c084fc, #f87171)",
+                  }}
+                >
+                  {embeddingLabel ?? embeddingModel}
+                </span>
               </span>
+            </ModelPickerPopover>
+          ) : (
+            // Workbench KB is still being created in the background.
+            <span className="flex items-center gap-1.5 text-xs text-muted">
+              <Spinner size="xs" /> Setting up embedding…
             </span>
-          </ModelPickerPopover>
+          )}
         </div>
       )}
       {/* Row 3: add source buttons + optional URL input */}
@@ -791,11 +956,26 @@ function SourcesPanel({
             // (e.g. "heroes/Raven.pdf"). The API route strips the path to just
             // the basename before passing it to OpenRAG, so we only need to
             // filter here using the basename.
-            const files = raw.filter((f) => {
+            let files = raw.filter((f) => {
               const basename = f.name.split("/").pop() ?? f.name;
               const ext = "." + basename.split(".").pop()?.toLowerCase();
               return SUPPORTED_EXTENSIONS.has(ext);
             });
+            // Workbench: silently drop files over 50 MB from folder picks,
+            // then warn the user how many were skipped.
+            if (ragBackend === "workbench") {
+              const skipped = files.filter((f) => f.size > WORKBENCH_MAX_BYTES);
+              files = files.filter((f) => f.size <= WORKBENCH_MAX_BYTES);
+              if (skipped.length > 0) {
+                setError(
+                  `${skipped.length} file${skipped.length > 1 ? "s" : ""} skipped — too large for Workbench (max 25 MB): ${skipped.map((f) => f.name.split("/").pop()).join(", ")}`,
+                );
+                if (files.length === 0) {
+                  if (folderInputRef.current) folderInputRef.current.value = "";
+                  return;
+                }
+              }
+            }
             if (folderInputRef.current) folderInputRef.current.value = "";
             if (raw.length > 0 && files.length === 0) {
               setError("No supported files found in the selected folder.");
@@ -1733,6 +1913,7 @@ function StudioPanel({
   onToggle,
   onResizeDrag,
   selectedFilenames,
+  activeConvAgentId,
 }: {
   notebookId: string;
   notes: Note[];
@@ -1746,6 +1927,8 @@ function StudioPanel({
   onResizeDrag: (startX: number) => void;
   /** Filenames checked in Sources panel; empty = use all notebook docs. */
   selectedFilenames: string[];
+  /** Workbench agent ID from the active conversation; null for OpenRAG notebooks. */
+  activeConvAgentId: string | null;
 }) {
   // Which type card is currently selected (null = grid only, no generate panel).
   const [activeType, setActiveType] = useState<NoteTypeKey | null>(null);
@@ -1787,6 +1970,8 @@ function StudioPanel({
             topic: capturedTopic,
             // Only send when non-empty — the route treats absence as "all docs".
             ...(selectedFilenames.length > 0 && { selectedFilenames }),
+            // Pass the active conversation's agent so the route uses the right one.
+            ...(activeConvAgentId && { workbenchAgentId: activeConvAgentId }),
           }),
         });
 
@@ -2309,9 +2494,14 @@ function StatusPill({ status }: { status: PodcastStatus | null }) {
 // ============================================================================
 function InlineTitle({
   title,
+  readonly = false,
   onSave,
 }: {
   title: string;
+  /** When true, the title is display-only — clicking it shows a tooltip
+   *  instead of opening an edit field. Used for Workbench notebooks whose
+   *  KB name is immutable after creation. */
+  readonly?: boolean;
   onSave: (newTitle: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -2343,6 +2533,18 @@ function InlineTitle({
   function cancel() {
     setDraft(title);
     setEditing(false);
+  }
+
+  // Readonly: plain text with a tooltip explaining why it can't be renamed.
+  if (readonly) {
+    return (
+      <span
+        title="AI Workbench Knowledge Base names cannot be changed after creation"
+        className="px-1 text-base font-medium cursor-default"
+      >
+        {title}
+      </span>
+    );
   }
 
   if (editing) {

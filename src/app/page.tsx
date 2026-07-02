@@ -20,7 +20,7 @@ import Link from "next/link";
 import Spinner from "@/components/Spinner";
 import MenuButton from "@/components/MenuButton";
 
-type Notebook = { id: string; title: string; created_at: number };
+type Notebook = { id: string; title: string; created_at: number; rag_backend?: string };
 
 export default function Home() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -28,6 +28,8 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
   // id of the notebook currently being renamed, or null if none
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  // Backend selection for new notebook creation
+  const [ragBackend, setRagBackend] = useState<"openrag" | "workbench">("openrag");
 
   // Fetch the list on mount. We do an optimistic prepend on create (below)
   // so we don't need to refetch after — but if you ever add deletion or
@@ -37,22 +39,19 @@ export default function Home() {
     const data = await res.json();
     setNotebooks(data.notebooks);
   }
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, []);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
     setCreating(true);
     try {
+      const body: Record<string, string> = { title, rag_backend: ragBackend };
       const res = await fetch("/api/notebooks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
+        body: JSON.stringify(body),
       });
       const { notebook } = await res.json();
-      // Optimistic prepend — the API returns the freshly-inserted row, so
-      // we don't need a follow-up GET. Newest-first sort is preserved.
       setTitle("");
       setNotebooks((n) => [notebook, ...n]);
     } finally {
@@ -95,20 +94,30 @@ export default function Home() {
         </p>
       </header>
 
-      <form onSubmit={create} className="mb-8 flex gap-2">
-        <input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="New notebook title"
-          className="flex-1 rounded-lg border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-accent"
-        />
-        <button
-          disabled={creating}
-          className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          {creating && <Spinner size="sm" />}
-          {creating ? "Creating…" : "Create"}
-        </button>
+      <form onSubmit={create} className="mb-8 space-y-2">
+        <div className="flex gap-2">
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="New notebook title"
+            className="flex-1 rounded-lg border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-accent"
+          />
+          {/* Backend picker: two logo-labelled toggle buttons instead of a plain select,
+              so users can see the platform brand at a glance. */}
+          <BackendPicker value={ragBackend} onChange={setRagBackend} />
+          <button
+            disabled={creating}
+            className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {creating && <Spinner size="sm" />}
+            {creating ? "Creating…" : "Create"}
+          </button>
+        </div>
+        {ragBackend === "workbench" && (
+          <p className="text-xs text-muted">
+            AI Workbench notebook names are permanent — the Astra collection name is set at creation and cannot be changed.
+          </p>
+        )}
       </form>
 
       <ul className="grid gap-3">
@@ -130,9 +139,14 @@ export default function Home() {
                 href={`/notebooks/${nb.id}`}
                 className="block px-4 py-3 pr-12"
               >
-                <div className="text-sm font-medium">{nb.title}</div>
-                <div className="text-xs text-muted">
-                  {new Date(nb.created_at).toLocaleString()}
+                <div className="flex items-center gap-2.5">
+                  <BackendLogo backend={nb.rag_backend} />
+                  <div>
+                    <div className="text-sm font-medium">{nb.title}</div>
+                    <div className="text-xs text-muted">
+                      {new Date(nb.created_at).toLocaleString()}
+                    </div>
+                  </div>
                 </div>
               </Link>
             )}
@@ -140,10 +154,17 @@ export default function Home() {
               <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition group-hover:opacity-100">
                 <MenuButton
                   actions={[
-                    {
-                      label: "Rename",
-                      onClick: () => setRenamingId(nb.id),
-                    },
+                    nb.rag_backend === "workbench"
+                      ? {
+                          label: "Rename",
+                          disabled: true,
+                          title: "AI Workbench Knowledge Base names cannot be changed after creation",
+                          onClick: () => {},
+                        }
+                      : {
+                          label: "Rename",
+                          onClick: () => setRenamingId(nb.id),
+                        },
                     {
                       label: "Delete notebook",
                       variant: "danger",
@@ -204,5 +225,81 @@ function RenameInput({
       />
       <div className="mt-0.5 text-xs text-muted">Enter to save · Esc to cancel</div>
     </div>
+  );
+}
+
+// ============================================================================
+// BackendPicker — logo-labelled toggle buttons for choosing the RAG backend
+// ============================================================================
+// Two side-by-side buttons, each showing the platform logo + name. The active
+// choice gets an accent border; the inactive one stays subdued. This replaces
+// a plain <select> so users can see the brand at a glance.
+// ============================================================================
+const BACKEND_OPTIONS = [
+  { value: "openrag",   label: "OpenRAG",     logo: "/assets/logo-openrag-dog.svg" },
+  { value: "workbench", label: "AI Workbench", logo: "/assets/logo-astra.png" },
+] as const;
+
+function BackendPicker({
+  value,
+  onChange,
+}: {
+  value: "openrag" | "workbench";
+  onChange: (v: "openrag" | "workbench") => void;
+}) {
+  return (
+    <div className="flex rounded-lg border border-edge overflow-hidden">
+      {BACKEND_OPTIONS.map((opt) => {
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={[
+              "flex items-center gap-1.5 px-2.5 py-2 text-xs transition",
+              active
+                ? "bg-accent/10 border-accent text-accent font-medium ring-1 ring-inset ring-accent"
+                : "bg-panel text-muted hover:bg-surface",
+            ].join(" ")}
+            title={opt.label}
+          >
+            <img src={opt.logo} alt={opt.label} width={16} height={16} className="shrink-0 rounded-sm" />
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ============================================================================
+// BackendLogo — tiny icon showing which RAG backend a notebook uses
+// ============================================================================
+// Rendered left of the notebook name on the home page. OpenRAG uses just the
+// dog portion of logo-openrag.png (cropped via CSS); Astra uses its standalone
+// icon mark logo-astra.png. Both are 20×20px to sit flush with the text line.
+// ============================================================================
+function BackendLogo({ backend }: { backend?: string }) {
+  if (backend === "workbench") {
+    return (
+      <img
+        src="/assets/logo-astra.png"
+        alt="Astra"
+        width={20}
+        height={20}
+        className="shrink-0 rounded-sm"
+      />
+    );
+  }
+  // Default to OpenRAG — use the official dog SVG icon.
+  return (
+    <img
+      src="/assets/logo-openrag-dog.svg"
+      alt="OpenRAG"
+      width={20}
+      height={20}
+      className="shrink-0"
+    />
   );
 }

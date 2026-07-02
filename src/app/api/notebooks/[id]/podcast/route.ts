@@ -30,7 +30,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { join } from "node:path";
 import { v4 as uuid } from "uuid";
 import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
-import { draftScript, parseScript, synthesizeAndStitch } from "@/lib/podcast";
+import { draftScript, parseScript, synthesizeAndStitch, type ChatFn } from "@/lib/podcast";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -55,10 +56,11 @@ export async function POST(
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id } = await ctx.params;
-  const { topic, title, selectedFilenames } = (await req.json().catch(() => ({}))) as {
+  const { topic, title, selectedFilenames, workbenchAgentId } = (await req.json().catch(() => ({}))) as {
     topic?: string;
     title?: string;
     selectedFilenames?: string[];
+    workbenchAgentId?: string;
   };
 
   const notebook = db
@@ -68,7 +70,26 @@ export async function POST(
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  const qc = buildQueryConfig(notebook, selectedFilenames);
+  const qc = notebook.rag_backend !== "workbench"
+    ? buildQueryConfig(notebook, selectedFilenames)
+    : { filterId: null, sourcePaths: null, limit: null, scoreThreshold: null };
+
+  // For Workbench notebooks, build a chatFn that routes through the backend.
+  // Always create a fresh conversation — same reasoning as the notes route.
+  let chatFn: ChatFn | undefined;
+  let podcastTempConvId: string | null = null;
+  if (notebook.rag_backend === "workbench") {
+    const rag = getBackend("workbench");
+    const { conversationId } = await rag.createConversation({ notebook, agentId: workbenchAgentId });
+    podcastTempConvId = conversationId;
+    chatFn = async (args) => {
+      return rag.chat({
+        prompt: args.prompt,
+        notebook,
+        workbenchConversationId: conversationId,
+      });
+    };
+  }
 
   const podcastId = uuid();
   const now = Date.now();
@@ -89,7 +110,7 @@ export async function POST(
   void (async () => {
     try {
       // === Step 1: draft script ==============================================
-      const { script, responseId } = await draftScript({ topic, ...qc });
+      const { script, responseId } = await draftScript({ topic, ...qc, chatFn });
       // Save response_id so the DELETE handler can clean up the OpenRAG thread,
       // same as every other note type.
       db.prepare(
@@ -127,6 +148,11 @@ export async function POST(
         err instanceof Error ? err.message : String(err),
         podcastId,
       );
+    } finally {
+      // Clean up the temporary Workbench conversation if we created one for scripting.
+      if (podcastTempConvId && notebook.rag_backend === "workbench") {
+        try { await getBackend("workbench").deleteConversation(podcastTempConvId, notebook, null); } catch { /* best-effort */ }
+      }
     }
   })();
 

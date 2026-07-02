@@ -29,8 +29,9 @@
 
 import { NextRequest } from "next/server";
 import { v4 as uuid } from "uuid";
-import db, { Notebook, Message, buildQueryConfig } from "@/lib/db";
+import db, { Notebook, Conversation, Message, buildQueryConfig } from "@/lib/db";
 import { chatStream } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -65,8 +66,8 @@ export async function POST(
   }
 
   const conversation = db
-    .prepare("SELECT id FROM conversations WHERE id = ? AND notebook_id = ?")
-    .get(conversationId, id);
+    .prepare("SELECT * FROM conversations WHERE id = ? AND notebook_id = ?")
+    .get(conversationId, id) as Conversation | undefined;
   if (!conversation) {
     return new Response(JSON.stringify({ error: "conversation not found" }), { status: 404 });
   }
@@ -103,16 +104,23 @@ export async function POST(
     updatedTitle = titleFromContent;
   }
 
-  const qc = buildQueryConfig(notebook, selectedFilenames);
+  const isWorkbench = notebook.rag_backend === "workbench";
 
-  // Light nudge only for the no-filter fallback path — same logic as before.
-  const grounded =
-    !qc.filterId && qc.sourcePaths
-      ? `Search the uploaded documents and answer the following question based on what you find. Cite filenames inline where relevant.\n\nUser question: ${content}`
-      : content;
+  // Build the prompt. OpenRAG needs a grounding nudge when there's no filter;
+  // Workbench agents handle grounding via their system prompt + tool calls.
+  let grounded: string;
+  if (isWorkbench) {
+    grounded = content;
+  } else {
+    const qc = buildQueryConfig(notebook, selectedFilenames);
+    grounded =
+      !qc.filterId && qc.sourcePaths
+        ? `Search the uploaded documents and answer the following question based on what you find. Cite filenames inline where relevant.\n\nUser question: ${content}`
+        : content;
+  }
 
   // Build the SSE stream and return it immediately so the browser can start
-  // receiving tokens while OpenRAG is still generating.
+  // receiving tokens while the backend is still generating.
   const stream = new ReadableStream({
     async start(controller) {
       function send(obj: Record<string, unknown>) {
@@ -120,40 +128,97 @@ export async function POST(
       }
 
       try {
-        const events = await chatStream({
-          prompt: grounded,
-          previousResponseId: lastAssistant?.response_id ?? null,
-          ...qc,
-        });
-
         let assembled = "";
         let responseId = "";
-        // Collected once per response — the SourcesEvent fires before "done".
         let sourcesJson: string | null = null;
 
-        for await (const event of events) {
-          if (event.type === "content") {
-            assembled += event.delta;
-            send({ type: "delta", text: event.delta });
-          } else if (event.type === "sources") {
-            // Forward source citations to the client so the UI can render a
-            // sources footer below the assistant message. Each Source carries
-            // filename, text (the retrieved chunk), score, page, and mimetype.
-            send({ type: "sources", sources: event.sources });
-            // Persist so citations survive navigation and page refresh.
-            sourcesJson = JSON.stringify(event.sources);
-          } else if (event.type === "done") {
-            responseId = event.chatId ?? "";
+        if (isWorkbench) {
+          // ── Workbench streaming path ──
+          const rag = getBackend("workbench");
+          const agentId = conversation.workbench_agent_id ?? process.env.WORKBENCH_DEFAULT_AGENT_ID ?? "";
+          let convId = conversation.workbench_conversation_id;
+
+          // If the conversation is missing on the Workbench side (e.g. it was
+          // never created, or was deleted externally), create a fresh one and
+          // save it so subsequent messages work without re-healing.
+          if (!convId) {
+            try {
+              const result = await rag.createConversation({ notebook: notebook!, agentId, title: conversation.title });
+              convId = result.conversationId;
+              if (convId) {
+                db.prepare(
+                  "UPDATE conversations SET workbench_conversation_id = ? WHERE id = ?",
+                ).run(convId, conversationId);
+              }
+            } catch {
+              // createConversation failed — chatStream will throw below and
+              // surface an error to the user.
+            }
+          }
+
+          async function streamConversation(wbConvId: string | null) {
+            const events = rag.chatStream({
+              prompt: grounded,
+              notebook: notebook!,
+              workbenchAgentId: agentId,
+              workbenchConversationId: wbConvId,
+            });
+            for await (const event of events) {
+              if (event.type === "token") {
+                assembled += event.delta;
+                send({ type: "delta", text: event.delta });
+              } else if (event.type === "done") {
+                responseId = event.responseId;
+              }
+            }
+          }
+
+          try {
+            await streamConversation(convId);
+          } catch (err) {
+            // Workbench returned 404 — the stored conversation_id is stale.
+            // Create a new conversation, persist it, and retry once.
+            const is404 = err instanceof Error && err.message.includes("conversation_not_found");
+            if (!is404) throw err;
+
+            const result = await rag.createConversation({ notebook: notebook!, agentId, title: conversation.title });
+            convId = result.conversationId;
+            if (convId) {
+              db.prepare(
+                "UPDATE conversations SET workbench_conversation_id = ? WHERE id = ?",
+              ).run(convId, conversationId);
+            }
+            assembled = "";
+            await streamConversation(convId);
+          }
+        } else {
+          // ── OpenRAG streaming path (unchanged behaviour) ──
+          const qc = buildQueryConfig(notebook, selectedFilenames);
+          const events = await chatStream({
+            prompt: grounded,
+            previousResponseId: lastAssistant?.response_id ?? null,
+            ...qc,
+          });
+
+          for await (const event of events) {
+            if (event.type === "content") {
+              assembled += event.delta;
+              send({ type: "delta", text: event.delta });
+            } else if (event.type === "sources") {
+              send({ type: "sources", sources: event.sources });
+              sourcesJson = JSON.stringify(event.sources);
+            } else if (event.type === "done") {
+              responseId = event.chatId ?? "";
+            }
           }
         }
 
-        // Persist the completed assistant turn to SQLite, including any
-        // source citations so they reload with the conversation history.
+        // Persist the completed assistant turn to SQLite.
         db.prepare(
           "INSERT INTO messages (id, notebook_id, conversation_id, role, content, response_id, sources_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(uuid(), id, conversationId, "assistant", assembled, responseId, sourcesJson, Date.now());
 
-        console.log("[openrag] chat.stream ← responseId:", responseId, "  responseLength:", assembled.length);
+        console.log("[chat] stream ← responseId:", responseId, "  responseLength:", assembled.length);
 
         // Signal completion. Include the new conversation title only on turn 1.
         send({ type: "done", ...(updatedTitle ? { conversationTitle: updatedTitle } : {}) });

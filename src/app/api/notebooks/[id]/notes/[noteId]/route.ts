@@ -28,6 +28,7 @@ import { NextRequest } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook, Note, buildQueryConfig } from "@/lib/db";
 import { chatStream, deleteConversation } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -101,25 +102,34 @@ export async function POST(
 ) {
   const { id, noteId: type } = await ctx.params;
 
+  console.log(`[notes] POST /${id}/notes/${type}`);
+
   if (!NOTE_TYPES.includes(type as NoteType)) {
     return new Response(JSON.stringify({ error: `unknown note type: ${type}` }), { status: 400 });
   }
   const noteType = type as NoteType;
 
-  const { topic, title, selectedFilenames } = (await req.json().catch(() => ({}))) as {
+  const { topic, title, selectedFilenames, workbenchAgentId } = (await req.json().catch(() => ({}))) as {
     topic?: string;
     title?: string;
     selectedFilenames?: string[];
+    workbenchAgentId?: string;
   };
 
   const notebook = db
     .prepare("SELECT * FROM notebooks WHERE id = ?")
     .get(id) as Notebook | undefined;
   if (!notebook) {
+    console.log(`[notes] notebook ${id} not found`);
     return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
   }
 
-  const qc = buildQueryConfig(notebook, selectedFilenames);
+  const isWorkbench = notebook.rag_backend === "workbench";
+  console.log(`[notes] backend=${notebook.rag_backend} kb=${notebook.workbench_kb_id ?? "none"} type=${noteType}`);
+
+  const qc = !isWorkbench
+    ? buildQueryConfig(notebook, selectedFilenames)
+    : { filterId: null, sourcePaths: null, limit: null, scoreThreshold: null };
   const base = NOTE_PROMPTS[noteType];
   const prompt = topic ? `Focus specifically on: ${topic}.\n\n${base}` : base;
 
@@ -130,18 +140,54 @@ export async function POST(
       }
 
       try {
-        // Notes use limit:12 for broader retrieval coverage over the full doc set.
-        const events = await chatStream({ prompt, ...qc, limit: qc.limit ?? 12 });
-
         let assembled = "";
         let responseId = "";
 
-        for await (const event of events) {
-          if (event.type === "content") {
-            assembled += event.delta;
-            send({ type: "delta", text: event.delta });
-          } else if (event.type === "done") {
-            responseId = event.chatId ?? "";
+        if (isWorkbench) {
+          // ── Workbench streaming path ──
+          //
+          // Always create a fresh conversation for Studio generation.
+          // Borrowing an existing user conversation is fragile — it may have
+          // been created under a different agent, may have a null workbench_conversation_id
+          // if the Workbench was unreachable at creation time, or may get its
+          // message history polluted by Studio prompts. A dedicated ephemeral
+          // conversation sidesteps all of that.
+          const rag = getBackend("workbench");
+          console.log(`[notes/workbench] creating conversation for ${noteType} generation agentId=${workbenchAgentId ?? "default"}`);
+          const { conversationId } = await rag.createConversation({ notebook, agentId: workbenchAgentId });
+          console.log(`[notes/workbench] conversation created: ${conversationId}`);
+
+          try {
+            const events = rag.chatStream({
+              prompt,
+              notebook,
+              workbenchConversationId: conversationId,
+            });
+            let tokenCount = 0;
+            for await (const event of events) {
+              if (event.type === "token") {
+                assembled += event.delta;
+                send({ type: "delta", text: event.delta });
+                tokenCount++;
+              } else if (event.type === "done") {
+                responseId = event.responseId;
+                console.log(`[notes/workbench] stream done — ${tokenCount} tokens, responseId=${responseId}`);
+              }
+            }
+          } finally {
+            console.log(`[notes/workbench] deleting conversation ${conversationId}`);
+            try { await rag.deleteConversation(conversationId, notebook, null); } catch { /* best-effort */ }
+          }
+        } else {
+          // ── OpenRAG streaming path ──
+          const events = await chatStream({ prompt, ...qc, limit: qc.limit ?? 12 });
+          for await (const event of events) {
+            if (event.type === "content") {
+              assembled += event.delta;
+              send({ type: "delta", text: event.delta });
+            } else if (event.type === "done") {
+              responseId = event.chatId ?? "";
+            }
           }
         }
 
@@ -160,6 +206,8 @@ export async function POST(
           console.log("[mindmap] cleaned assembled END ---");
         }
 
+        console.log(`[notes] saving note — type=${noteType} assembled.length=${assembled.length}`);
+
         // Persist the note to SQLite once streaming is complete.
         const now = Date.now();
         const noteId = uuid();
@@ -177,9 +225,12 @@ export async function POST(
         );
 
         const note = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId) as Note;
+        console.log(`[notes] done — noteId=${noteId}`);
         send({ type: "done", note });
       } catch (err) {
-        send({ type: "error", error: err instanceof Error ? err.message : "note generation failed" });
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[notes] ERROR:`, err);
+        send({ type: "error", error: msg });
       } finally {
         controller.close();
       }

@@ -58,6 +58,9 @@ export type Notebook = {
   openrag_filter_color: string | null;           // color name set by user in OpenRAG UI; refreshed on GET
   openrag_filter_limit: number | null;           // queryData.limit from OpenRAG; refreshed on GET
   openrag_filter_score_threshold: number | null; // queryData.scoreThreshold from OpenRAG; refreshed on GET
+  rag_backend: "openrag" | "workbench";          // which RAG backend this notebook uses
+  workbench_kb_id: string | null;                // Workbench Knowledge Base UUID; null for OpenRAG notebooks
+  workbench_embedding_service_id: string | null; // Workbench embedding service used by the KB
 };
 
 export type Document = {
@@ -88,6 +91,8 @@ export type Conversation = {
   notebook_id: string;
   title: string;
   created_at: number;
+  workbench_agent_id: string | null;         // which Workbench agent this conversation uses
+  workbench_conversation_id: string | null;  // Workbench conversation UUID for threading
 };
 
 export type Note = {
@@ -232,8 +237,33 @@ function getDb(): Database.Database {
     if (nbCols.length > 0 && !nbCols.some((c) => c.name === "openrag_filter_score_threshold")) {
       conn.exec("ALTER TABLE notebooks ADD COLUMN openrag_filter_score_threshold REAL");
     }
+    // Per-notebook RAG backend selection: 'openrag' (default) or 'workbench'.
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "rag_backend")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN rag_backend TEXT NOT NULL DEFAULT 'openrag'");
+    }
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "workbench_kb_id")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN workbench_kb_id TEXT");
+    }
+    if (nbCols.length > 0 && !nbCols.some((c) => c.name === "workbench_embedding_service_id")) {
+      conn.exec("ALTER TABLE notebooks ADD COLUMN workbench_embedding_service_id TEXT");
+    }
   } catch {
     // notebooks table doesn't exist yet — CREATE TABLE below includes the columns.
+  }
+
+  // Add workbench columns to conversations for per-conversation agent selection.
+  try {
+    const convCols = conn
+      .prepare("PRAGMA table_info(conversations)")
+      .all() as { name: string }[];
+    if (convCols.length > 0 && !convCols.some((c) => c.name === "workbench_agent_id")) {
+      conn.exec("ALTER TABLE conversations ADD COLUMN workbench_agent_id TEXT");
+    }
+    if (convCols.length > 0 && !convCols.some((c) => c.name === "workbench_conversation_id")) {
+      conn.exec("ALTER TABLE conversations ADD COLUMN workbench_conversation_id TEXT");
+    }
+  } catch {
+    // conversations table doesn't exist yet — CREATE TABLE below handles it.
   }
 
   // Add response_id and topic to notes if created before those columns existed.
@@ -263,13 +293,18 @@ function getDb(): Database.Database {
       openrag_filter_icon            TEXT,
       openrag_filter_color           TEXT,
       openrag_filter_limit           INTEGER,
-      openrag_filter_score_threshold REAL
+      openrag_filter_score_threshold REAL,
+      rag_backend                    TEXT NOT NULL DEFAULT 'openrag',
+      workbench_kb_id                TEXT,
+      workbench_embedding_service_id TEXT
     );
     CREATE TABLE IF NOT EXISTS conversations (
-      id          TEXT PRIMARY KEY,
-      notebook_id TEXT NOT NULL,
-      title       TEXT NOT NULL,
-      created_at  INTEGER NOT NULL,
+      id                         TEXT PRIMARY KEY,
+      notebook_id                TEXT NOT NULL,
+      title                      TEXT NOT NULL,
+      created_at                 INTEGER NOT NULL,
+      workbench_agent_id         TEXT,
+      workbench_conversation_id  TEXT,
       FOREIGN KEY(notebook_id) REFERENCES notebooks(id) ON DELETE CASCADE
     );
     CREATE TABLE IF NOT EXISTS documents (

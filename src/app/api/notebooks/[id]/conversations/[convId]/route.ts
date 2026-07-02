@@ -25,12 +25,40 @@
 //   Last-conv reset:      200 { conversation: Conversation }
 // ============================================================================
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
-import db, { Conversation, Message } from "@/lib/db";
+import db, { Conversation, Message, Notebook } from "@/lib/db";
 import { deleteConversation as deleteOpenRagConversation } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
+
+/**
+ * PATCH /api/notebooks/[id]/conversations/[convId]
+ *
+ * Body: { workbench_agent_id: string }
+ *
+ * Changes the Workbench agent bound to this conversation. Does not touch
+ * the existing Workbench conversation thread — just updates the stored
+ * agent ID so the next message uses the new agent.
+ */
+export async function PATCH(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string; convId: string }> },
+) {
+  const { convId } = await ctx.params;
+  const body = (await req.json().catch(() => ({}))) as { workbench_agent_id?: string };
+  if (!body.workbench_agent_id) {
+    return NextResponse.json({ error: "workbench_agent_id is required" }, { status: 400 });
+  }
+  const updated = db.prepare(
+    "UPDATE conversations SET workbench_agent_id = ? WHERE id = ?",
+  ).run(body.workbench_agent_id, convId);
+  if (updated.changes === 0) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  return NextResponse.json({ ok: true });
+}
 
 /** DELETE /api/notebooks/[id]/conversations/[convId] */
 export async function DELETE(
@@ -45,6 +73,11 @@ export async function DELETE(
   if (!conversation) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+
+  const notebook = db
+    .prepare("SELECT * FROM notebooks WHERE id = ?")
+    .get(id) as Notebook | undefined;
+  const isWorkbench = notebook?.rag_backend === "workbench";
 
   // Grab the last assistant response_id — this is the OpenRAG chatId for the
   // thread. We read it before deleting messages so it's still available.
@@ -62,24 +95,53 @@ export async function DELETE(
       .get(id) as { n: number }
   ).n;
 
+  // Helper: clean up the backend conversation thread (best-effort).
+  async function cleanupBackendThread() {
+    try {
+      if (isWorkbench && conversation!.workbench_conversation_id && notebook) {
+        const rag = getBackend("workbench");
+        await rag.deleteConversation(
+          conversation!.workbench_conversation_id,
+          notebook,
+          conversation!.workbench_agent_id,
+        );
+      } else if (!isWorkbench && lastAssistant?.response_id) {
+        await deleteOpenRagConversation(lastAssistant.response_id);
+      }
+    } catch {
+      // Backend unreachable or thread already gone — not a hard failure.
+    }
+  }
+
   if (totalConvs === 1) {
-    // Last conversation — reset in-place rather than delete. Clear the
-    // messages, then replace the row with a fresh id and title.
+    // Last conversation — reset in-place rather than delete.
     db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(convId);
     db.prepare("DELETE FROM conversations WHERE id = ?").run(convId);
 
-    const newId = uuid();
-    db.prepare(
-      "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, 'Conversation 1', ?)",
-    ).run(newId, id, Date.now());
+    await cleanupBackendThread();
 
-    // Clean up the OpenRAG thread best-effort.
-    if (lastAssistant?.response_id) {
+    const newId = uuid();
+    if (isWorkbench && notebook) {
+      const agentId = conversation.workbench_agent_id ?? process.env.WORKBENCH_DEFAULT_AGENT_ID ?? "";
+      const rag = getBackend("workbench");
       try {
-        await deleteOpenRagConversation(lastAssistant.response_id);
+        const { conversationId } = await rag.createConversation({
+          notebook,
+          agentId,
+          title: "Conversation 1",
+        });
+        db.prepare(
+          "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id, workbench_conversation_id) VALUES (?, ?, 'Conversation 1', ?, ?, ?)",
+        ).run(newId, id, Date.now(), agentId, conversationId);
       } catch {
-        // OpenRAG unreachable or thread already gone — not a hard failure.
+        db.prepare(
+          "INSERT INTO conversations (id, notebook_id, title, created_at, workbench_agent_id) VALUES (?, ?, 'Conversation 1', ?, ?)",
+        ).run(newId, id, Date.now(), agentId);
       }
+    } else {
+      db.prepare(
+        "INSERT INTO conversations (id, notebook_id, title, created_at) VALUES (?, ?, 'Conversation 1', ?)",
+      ).run(newId, id, Date.now());
     }
 
     const replacement = db
@@ -92,14 +154,7 @@ export async function DELETE(
   db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(convId);
   db.prepare("DELETE FROM conversations WHERE id = ?").run(convId);
 
-  // Clean up the OpenRAG thread best-effort.
-  if (lastAssistant?.response_id) {
-    try {
-      await deleteOpenRagConversation(lastAssistant.response_id);
-    } catch {
-      // OpenRAG unreachable or thread already gone — not a hard failure.
-    }
-  }
+  await cleanupBackendThread();
 
   return NextResponse.json({ ok: true });
 }

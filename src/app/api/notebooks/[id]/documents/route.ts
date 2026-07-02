@@ -1,31 +1,23 @@
 // ============================================================================
-// /api/notebooks/[id]/documents — upload a file and ingest it into OpenRAG
+// /api/notebooks/[id]/documents — upload a file and ingest into the RAG backend
 // ============================================================================
 //
 // _Basically_, this is the "+ Add source" button. The browser POSTs a
-// multipart form, we read the file bytes, hand them to OpenRAG's ingest
-// endpoint (which runs them through Docling -> embed -> OpenSearch), and
-// then save a row in our SQLite so the UI can list it.
+// multipart form, we read the file bytes, hand them to the notebook's
+// configured backend (OpenRAG or Workbench) for ingest, then save a pointer
+// row in SQLite so the UI can list it.
 //
 // Two-step responsibility split:
-//   - OpenRAG owns the actual content (chunks, embeddings, retrieval).
+//   - The backend owns the actual content (chunks, embeddings, retrieval).
 //   - We own a tiny "list of files the user uploaded" pointer table so the
-//     Sources panel renders without round-tripping OpenRAG.
-//
-// Lazy filter creation: if the notebook was created while OpenRAG was down
-// its openrag_filter_id will be NULL. We attempt to create it here before
-// ingesting so that from this point forward all chat/generation calls are
-// scoped to this notebook's filter.
-//
-// We don't store the file on disk ourselves — once it's in OpenSearch we
-// don't need it. If you wanted a "download original" feature later, you'd
-// add a writeFileSync here under public/uploads or similar.
+//     Sources panel renders without round-tripping the backend.
 // ============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import { v4 as uuid } from "uuid";
 import db, { Notebook } from "@/lib/db";
 import { ingestDocument, createFilter, scheduleSyncFilterSources } from "@/lib/openrag";
+import { getBackend } from "@/lib/rag";
 
 export const runtime = "nodejs";
 
@@ -82,12 +74,23 @@ export async function POST(
 
   let taskId: string;
   try {
-    const r = await ingestDocument({
-      filename,
-      bytes,
-      contentType: file.type || "application/octet-stream",
-    });
-    taskId = r.taskId;
+    if (notebook.rag_backend === "workbench") {
+      const rag = getBackend("workbench");
+      const r = await rag.ingestDocument({
+        filename,
+        bytes,
+        contentType: file.type || "application/octet-stream",
+        notebook,
+      });
+      taskId = r.taskId;
+    } else {
+      const r = await ingestDocument({
+        filename,
+        bytes,
+        contentType: file.type || "application/octet-stream",
+      });
+      taskId = r.taskId;
+    }
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "ingest failed" },
@@ -109,23 +112,21 @@ export async function POST(
     ).run(docId, id, filename, bytes.length, mimetype, taskId || null, Date.now());
   }
 
-  // Schedule a debounced filter sync. When multiple files upload in quick
-  // succession each call resets the 1.5s timer; only the final fire does the
-  // actual get → update round-trip. getFilenames() is evaluated at fire time
-  // so it always captures every file that has landed by then.
-  const freshNotebook = db
-    .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
-    .get(id) as { openrag_filter_id: string | null } | undefined;
-  if (freshNotebook?.openrag_filter_id) {
-    const filterId = freshNotebook.openrag_filter_id;
-    // Only sync ready docs — passing indexing/failed filenames into data_sources
-    // would tell OpenRAG to retrieve from documents it hasn't embedded yet.
-    scheduleSyncFilterSources(filterId, () =>
-      (db
-        .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
-        .all(id) as { filename: string }[]
-      ).map((r) => r.filename)
-    );
+  // Schedule a debounced filter sync (OpenRAG only — Workbench doesn't need
+  // explicit filter syncing because each KB is its own collection).
+  if (notebook.rag_backend !== "workbench") {
+    const freshNotebook = db
+      .prepare("SELECT openrag_filter_id FROM notebooks WHERE id = ?")
+      .get(id) as { openrag_filter_id: string | null } | undefined;
+    if (freshNotebook?.openrag_filter_id) {
+      const filterId = freshNotebook.openrag_filter_id;
+      scheduleSyncFilterSources(filterId, () =>
+        (db
+          .prepare("SELECT filename FROM documents WHERE notebook_id = ? AND ingest_status = 'ready'")
+          .all(id) as { filename: string }[]
+        ).map((r) => r.filename)
+      );
+    }
   }
 
   return NextResponse.json({

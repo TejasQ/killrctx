@@ -351,11 +351,45 @@ async function installWorkbench(backends) {
   log.info(`Installing AI Workbench → ${chalk.dim(dir)}`)
   log.nl()
 
+  // Download compose file and env template
   await downloadFile(
     'https://raw.githubusercontent.com/datastax/ai-workbench/main/docker-compose.yml',
     path.join(dir, 'docker-compose.yml')
   )
+  await downloadFile(
+    'https://raw.githubusercontent.com/datastax/ai-workbench/main/.env.example',
+    path.join(dir, '.env')
+  )
 
+  // OpenRouter is the default LLM provider — chat returns 503 without it.
+  // Astra credentials are optional: the local file driver works without them.
+  log.info('Configure AI Workbench  ' + chalk.dim('(leave blank to skip any key)'))
+  log.nl()
+
+  const wb = await prompts([
+    {
+      type:    'invisible',
+      name:    'openrouterKey',
+      message: `OpenRouter API key ${chalk.dim('(openrouter.ai/keys · needed for chat)')}:`,
+    },
+    {
+      type:    'invisible',
+      name:    'astraEndpoint',
+      message: `Astra DB endpoint ${chalk.dim('(optional · https://<id>-<region>.apps.astra.datastax.com)')}:`,
+    },
+    {
+      type:    'invisible',
+      name:    'astraToken',
+      message: `Astra DB token ${chalk.dim('(optional · AstraCS:…)')}:`,
+    },
+  ])
+
+  const envPath = path.join(dir, '.env')
+  if (wb.openrouterKey) injectEnvValue(envPath, 'OPENROUTER_API_KEY',    wb.openrouterKey)
+  if (wb.astraEndpoint) injectEnvValue(envPath, 'ASTRA_DB_API_ENDPOINT', wb.astraEndpoint)
+  if (wb.astraToken)    injectEnvValue(envPath, 'ASTRA_DB_APPLICATION_TOKEN', wb.astraToken)
+
+  log.nl()
   await runDockerCompose(dir)
   await pollHealth(backends.workbenchUrl, '/healthz', 'AI Workbench', 180)
   log.ok('AI Workbench is running.')

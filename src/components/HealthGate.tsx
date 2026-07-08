@@ -1,21 +1,18 @@
 // ============================================================================
-// HealthGate.tsx — block the UI until the OpenRAG backend is ready
+// HealthGate.tsx — block the UI until the RAG backend is ready
 // ============================================================================
 //
-// _Basically_, OpenSearch + Langflow + the OpenRAG backend take 30-90
-// seconds to boot. If we let users start clicking around before the
-// backend is healthy, every click hits a 502 and the app feels broken.
-// This component sits at the root of the layout tree and renders a
-// status panel until /api/health says everything's ready.
+// _Basically_, the RAG backend (OpenRAG or AI Workbench) takes 30-90 seconds
+// to boot. If we let users start clicking around before it's healthy, every
+// click hits a 502 and the app feels broken. This component sits at the root
+// of the layout tree and renders a status panel until /api/health says ready.
 //
 // Four states the gate shows:
 //   1. **Connecting**  First probe in flight — we don't know anything yet.
-//   2. **Booting**     Local install detected; OpenSearch is still warming up.
-//                      Shows a spinner and "Waiting for local OpenRAG…".
-//   3. **Needs setup** Local install reachable but no models configured yet.
-//                      Shows "Run one-time setup" button.
-//   4. **Ready**       Pass through to children. If external=true, skipped
-//                      the booting phase entirely.
+//   2. **Booting**     Backend detected but still warming up. Shows a spinner.
+//   3. **Needs setup** OpenRAG reachable but no models configured yet.
+//                      Shows "Run one-time setup" button. (OpenRAG only.)
+//   4. **Ready**       Pass through to children.
 //
 // Why poll instead of streaming with SSE/WebSockets?
 //   The 2s tick is fine for a startup probe, doesn't need a long-lived
@@ -31,11 +28,11 @@ import { OpenRAGContext, type OpenRAGSettings } from "./OpenRAGContext";
 
 type Settings = { llm: string; embedding: string };
 type Health =
-  | { ready: true; external?: boolean; settings: Settings }
+  | { ready: true; external?: boolean; backend?: string; settings: Settings }
   | {
       ready: false;
       reason: string;
-      // Local install reachable + API key loaded but models not selected.
+      // OpenRAG only: local install reachable but models not configured yet.
       needsSetup?: boolean;
       // Nothing reachable yet — keep polling.
       booting?: boolean;
@@ -121,12 +118,12 @@ export default function HealthGate({ children }: { children: ReactNode }) {
             <Spinner size="sm" />
             <span className="font-medium">
               {connecting
-                ? "Connecting to OpenRAG…"
+                ? "Connecting to backend…"
                 : booting
-                  ? "Waiting for local OpenRAG to start…"
+                  ? health?.reason ?? "Waiting for backend to start…"
                   : needsSetup
                     ? "OpenRAG needs one-time setup"
-                    : "Connecting to OpenRAG…"}
+                    : "Connecting to backend…"}
             </span>
           </div>
           <p className="text-xs text-muted">

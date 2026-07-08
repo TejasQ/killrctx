@@ -1,28 +1,29 @@
 // ============================================================================
-// /api/health — is the OpenRAG backend ready to serve requests?
+// /api/health — is the RAG backend (OpenRAG or AI Workbench) ready?
 // ============================================================================
 //
 // _Basically_, the HealthGate client component polls this endpoint every 2s
-// at startup. We use a dual-mode strategy to handle both local installs and
-// external instances:
+// at startup. We support two backends and probe whichever is configured:
 //
-//   Local install (npm run openrag:up):
-//     OPENRAG_INSTALL_URL (:8000) is reachable. We probe it with a raw fetch
-//     because we need providers[].has_api_key from the response — the SDK
-//     strips that field. This lets us distinguish "needs setup" from "no key".
-//     Returns one of three states:
+//   AI Workbench (WORKBENCH_URL set):
+//     A single GET to /healthz. If it returns 200, the Workbench is ready —
+//     it manages its own setup, so we report ready: true immediately.
+//     Checked first so a developer running Workbench doesn't hit the OpenRAG
+//     paths at all.
+//
+//   OpenRAG — local install (OPENRAG_INSTALL_URL / :8000 reachable):
+//     Raw fetch to /settings because we need providers[].has_api_key — the
+//     SDK strips that field. Distinguishes three states:
 //       { ready: true }              — models configured, gate dismisses
 //       { ready: false, needsSetup } — models missing, show setup button
 //       { ready: false, booting }    — OpenSearch still warming up
 //
-//   External instance (remote/cloud/standard OpenRAG):
-//     OPENRAG_INSTALL_URL is unreachable (port 8000 not published). We fall
-//     back to client.settings.get() via OPENRAG_URL (:3000). If it responds,
-//     the instance is operator-managed and we trust it's configured — report
-//     ready: true immediately. If it also fails, report booting.
+//   OpenRAG — external instance (OPENRAG_URL / :3000, port 8000 not published):
+//     Falls back to client.settings.get() via OPENRAG_URL. If it responds,
+//     report ready: true. If both fail, report booting.
 //
 // See specs/openrag-sdk-migration/design.md — "Health check dual-mode strategy"
-// for the full rationale.
+// for the OpenRAG rationale.
 // ============================================================================
 
 import { NextResponse } from "next/server";
@@ -33,10 +34,43 @@ export const runtime = "nodejs";
 // genuinely want a fresh probe on every poll.
 export const dynamic = "force-dynamic";
 
-const installUrl = process.env.OPENRAG_INSTALL_URL ?? "http://localhost:8000";
+const installUrl   = process.env.OPENRAG_INSTALL_URL ?? "http://localhost:8000";
+const workbenchUrl = (process.env.WORKBENCH_URL ?? "").replace(/\/$/, "");
 
 export async function GET() {
-  // ── Path 1: local install probe ─────────────────────────────────────────
+  // ── Path 0: AI Workbench probe ───────────────────────────────────────────
+  // When WORKBENCH_URL is set, try it first. The Workbench manages its own
+  // model configuration — if /healthz returns 200 we're done.
+  if (workbenchUrl) {
+    try {
+      const res = await fetch(`${workbenchUrl}/healthz`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (res.ok) {
+        return NextResponse.json({
+          ready: true,
+          external: true,
+          backend: "workbench",
+          settings: { llm: "workbench", embedding: "workbench" },
+        });
+      }
+      // Workbench URL is set but not yet responding — keep polling.
+      // Don't fall through to OpenRAG paths; that would give a misleading
+      // "OpenRAG starting up" message when the user chose Workbench.
+      return NextResponse.json(
+        { ready: false, booting: true, reason: `AI Workbench starting up… (HTTP ${res.status})` },
+        { status: 503 },
+      );
+    } catch {
+      return NextResponse.json(
+        { ready: false, booting: true, reason: "AI Workbench is starting up…" },
+        { status: 503 },
+      );
+    }
+  }
+
+  // ── Path 1: local OpenRAG install probe ──────────────────────────────────
   // Not using SDK: the raw /settings response includes providers[].has_api_key,
   // which the SDK's SettingsResponse strips out. We need that field to decide
   // whether to show "Run setup" vs "set your API key" in the HealthGate UI.

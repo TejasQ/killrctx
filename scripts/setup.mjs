@@ -184,54 +184,74 @@ async function detectBackends() {
 
 // ─── ensureDocker ─────────────────────────────────────────────────────────────
 // _Basically_, make sure `docker info` works before we try to pull/run images.
-// If Docker isn't running, we offer to install Colima (fast, no GUI) or point
-// to Docker Desktop (requires manual install — GUI license agreement).
+//
+// Resolution order:
+//   1. docker info succeeds              → already running, nothing to do
+//   2. colima on PATH, not started yet   → colima start
+//   3. colima not on PATH                → brew install colima docker → colima start
+//   4. user chooses Docker Desktop       → pause and wait for them to start it
 async function ensureDocker() {
-  try {
-    execSync('docker info', { stdio: 'ignore' })
-    return // Docker is already running — nothing to do
-  } catch {
-    // Docker CLI missing or daemon not running
-  }
+  // Case 1 — Docker is already reachable
+  if (dockerRunning()) return
 
-  log.warn('No Docker runtime detected.')
-  log.nl()
+  const colimaOnPath = spawnSync('which', ['colima'], { stdio: 'pipe' }).status === 0
 
-  const { choice } = await prompts({
-    type:    'select',
-    name:    'choice',
-    message: 'Docker is needed to install a backend. Install one now?',
-    choices: [
-      { title: `${chalk.bold('Colima')}         ${chalk.dim('recommended · lightweight · macOS/Linux · ~2 min')}`, value: 'colima' },
-      { title: `${chalk.bold('Docker Desktop')} ${chalk.dim('GUI app · macOS/Windows/Linux · ~5 min')}`,           value: 'desktop' },
-      { title: chalk.dim('Cancel setup'),                                                                            value: 'cancel' },
-    ],
-  })
-
-  if (!choice || choice === 'cancel') {
+  if (colimaOnPath) {
+    // Case 2 — Colima installed but not started
+    log.warn('Colima found but Docker is not reachable. Starting Colima…')
     log.nl()
-    log.info('Setup cancelled. Run npm run init when Docker is ready.')
-    process.exit(0)
-  }
-
-  if (choice === 'colima') {
-    await installColima()
+    const child = spawn('colima', ['start'], { stdio: 'inherit' })
+    await waitForChild(child, 'colima start')
   } else {
-    await waitForDockerDesktop()
+    // Case 3/4 — nothing present: ask which runtime to use
+    log.warn('No Docker runtime detected.')
+    log.nl()
+
+    const { choice } = await prompts({
+      type:    'select',
+      name:    'choice',
+      message: 'Docker is needed to install a backend. Install one now?',
+      choices: [
+        { title: `${chalk.bold('Colima')}         ${chalk.dim('recommended · lightweight · macOS/Linux · ~2 min')}`, value: 'colima' },
+        { title: `${chalk.bold('Docker Desktop')} ${chalk.dim('GUI app · macOS/Windows/Linux · ~5 min')}`,           value: 'desktop' },
+        { title: chalk.dim('Cancel setup'),                                                                            value: 'cancel' },
+      ],
+    })
+
+    if (!choice || choice === 'cancel') {
+      log.nl()
+      log.info('Setup cancelled. Run npm run init when Docker is ready.')
+      process.exit(0)
+    }
+
+    if (choice === 'colima') {
+      await installAndStartColima()
+    } else {
+      await waitForDockerDesktop()
+    }
   }
 
-  // Re-check after install
+  // Final check — confirm docker info works after whatever we did
+  if (!dockerRunning()) {
+    log.fail('Docker still not reachable. Please start it manually and re-run npm run init.')
+    process.exit(1)
+  }
+
+  log.ok('Docker is running.')
+  log.nl()
+}
+
+// Returns true if `docker info` exits cleanly (daemon is reachable)
+function dockerRunning() {
   try {
     execSync('docker info', { stdio: 'ignore' })
-    log.ok('Docker is running.')
-    log.nl()
+    return true
   } catch {
-    log.fail('Docker still not reachable after install. Please start it manually.')
-    process.exit(1)
+    return false
   }
 }
 
-async function installColima() {
+async function installAndStartColima() {
   // Ensure Homebrew is present first
   const brewCheck = spawnSync('which', ['brew'], { stdio: 'pipe' })
   if (brewCheck.status !== 0) {

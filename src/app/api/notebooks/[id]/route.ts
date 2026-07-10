@@ -106,6 +106,29 @@ export async function GET(
     }
   }
 
+  // Lazy backfill: if a workbench notebook's KB was never created (the
+  // background task in POST /notebooks threw and was swallowed), retry it
+  // inline on the next GET. The write is fire-and-forget; the client will
+  // pick up the new IDs on its next 3s refresh.
+  if (notebook.rag_backend === "workbench" && !notebook.workbench_kb_id) {
+    void (async () => {
+      try {
+        const rag = getBackend("workbench");
+        const embeddingServiceId = process.env.WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID;
+        const { resourceId } = await rag.createNotebookResources({
+          notebookId: id,
+          notebookTitle: notebook.title,
+          embeddingServiceId,
+        });
+        db.prepare(
+          "UPDATE notebooks SET workbench_kb_id = ?, workbench_embedding_service_id = ? WHERE id = ?",
+        ).run(resourceId, embeddingServiceId ?? null, id);
+      } catch {
+        // Still unreachable — try again on the next poll.
+      }
+    })();
+  }
+
   // Fire-and-forget: insert any KB docs not yet in SQLite so files ingested
   // directly via the Workbench UI show up on the next refresh (REQ-001).
   if (notebook.rag_backend === "workbench" && notebook.workbench_kb_id) {

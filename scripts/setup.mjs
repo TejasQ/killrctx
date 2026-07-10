@@ -71,30 +71,45 @@ cli.parse()
 async function main(opts = {}) {
   printBanner()
 
-  // 1. Detect what's already running
+  // 1. Detect what's already running and what's installed (but stopped)
   const backends = await detectBackends()
+  const installed = detectInstalledDirs()
 
-  // 2. If nothing found, ensure Docker then install a backend
-  if (!backends.openrag && !backends.workbench) {
-    if (!opts['skip-docker']) {
-      await ensureDocker()
-    }
-    await handleNoBackends(backends)
-    // Re-detect after install so collectKeys() knows what's live
-    const redetected = await detectBackends()
-    backends.openrag      = redetected.openrag
-    backends.workbench    = redetected.workbench
-    backends.openragUrl   = redetected.openragUrl
-    backends.workbenchUrl = redetected.workbenchUrl
+  // 2. Always ask the user which backend to use — detection is shown as
+  //    context in the prompt, but the user is never skipped past this.
+  if (!opts['skip-docker']) {
+    await ensureDocker()
+  }
+  const choice = await promptBackendChoice(backends, installed)
+
+  // 3. If they picked a stopped install, start it now
+  if (choice.action === 'start') {
+    await startBackend(choice.key, backends)
   }
 
-  // 3. Gather API keys
-  const keys = await collectKeys(backends)
+  // 4. Gather API keys and write .env.local immediately — before any further
+  //    Docker work. File exists even if a later step fails.
+  const keys = await collectKeys(backends, choice.key)
 
-  // 4. Write .env.local
+  // 4a. If workbench is the chosen backend, auto-discover its workspace/agent/
+  //     service IDs from the live API so the user never has to paste UUIDs.
+  if (choice.key === 'workbench') {
+    const discovered = await discoverWorkbenchConfig(backends.workbenchUrl)
+    Object.assign(keys, discovered)
+  }
+
   await writeEnvLocal(backends, keys)
 
-  // 5. Launch (unless skipped)
+  // 5. Fresh install — only reached when user picked a backend not yet installed
+  if (choice.action === 'install') {
+    if (choice.key === 'openrag') {
+      await installOpenRAG(backends, keys)
+    } else {
+      await installWorkbench(backends, keys)
+    }
+  }
+
+  // 6. Launch (unless skipped)
   if (!opts['skip-launch']) {
     await launchApp(keys)
   } else {
@@ -124,7 +139,9 @@ function loadEnvFile(filePath) {
     const eq = trimmed.indexOf('=')
     if (eq === -1) continue
     const key = trimmed.slice(0, eq).trim()
-    const val = trimmed.slice(eq + 1).trim()
+    // Strip inline comments — e.g. KEY=value  # comment
+    const raw = trimmed.slice(eq + 1)
+    const val = raw.replace(/#.*$/, '').trim()
     vars[key] = val
   }
   return vars
@@ -284,159 +301,350 @@ async function waitForDockerDesktop() {
   await prompts({ type: 'invisible', name: '_', message: 'Press Enter when Docker Desktop is running…' })
 }
 
-// ─── handleNoBackends ────────────────────────────────────────────────────────
-// Offers to install OpenRAG or AI Workbench into sibling directories by
-// downloading their docker-compose.yml and running `docker compose up -d`.
-async function handleNoBackends(backends) {
+// ─── detectInstalledDirs ─────────────────────────────────────────────────────
+// Returns which sibling backend dirs exist on disk (installed but possibly
+// stopped). This is separate from detectBackends() which probes HTTP health.
+function detectInstalledDirs() {
+  return {
+    openrag:   fs.existsSync(path.join(ROOT, '..', 'openrag',      'docker-compose.yml')),
+    workbench: fs.existsSync(path.join(ROOT, '..', 'ai-workbench', 'docker-compose.yml')),
+  }
+}
+
+// ─── promptBackendChoice ─────────────────────────────────────────────────────
+// _Basically_, always asks the user which backend to use. Detection results
+// are shown inline as status hints so the user can make an informed choice,
+// but nothing is auto-selected or auto-skipped.
+// Returns { key: 'openrag'|'workbench'|'skip', action: 'none'|'start'|'install' }
+async function promptBackendChoice(backends, installed) {
+  const label = (key, displayName, url) => {
+    if (backends[key])  return `${chalk.bold(displayName)}  ${chalk.green('● running')}  ${chalk.dim(url)}`
+    if (installed[key]) return `${chalk.bold(displayName)}  ${chalk.yellow('● installed, not running')}  ${chalk.dim(url)}`
+    return                     `${chalk.bold(displayName)}  ${chalk.dim('not installed · Docker · ~5 min')}`
+  }
+
   const { choice } = await prompts({
     type:    'select',
     name:    'choice',
-    message: 'No backend detected. Install one automatically?',
+    message: 'Which backend would you like to use?',
     choices: [
-      { title: `${chalk.bold('OpenRAG')}        ${chalk.dim('open-source · Docker · ~5 min')}`,  value: 'openrag' },
-      { title: `${chalk.bold('AI Workbench')}   ${chalk.dim('DataStax · Docker · ~3 min')}`,     value: 'workbench' },
-      { title: chalk.dim('Skip for now'),                                                          value: 'skip' },
+      { title: label('openrag',   'OpenRAG       ', backends.openragUrl),   value: 'openrag' },
+      { title: label('workbench', 'AI Workbench  ', backends.workbenchUrl), value: 'workbench' },
+      { title: chalk.dim('Skip for now'),                                    value: 'skip' },
     ],
   })
 
   if (!choice || choice === 'skip') {
-    log.warn('Skipping backend install. Some features will be unavailable.')
+    log.warn('Skipping backend selection. Some features will be unavailable.')
     log.nl()
-    return
+    return { key: 'skip', action: 'none' }
   }
 
-  if (choice === 'openrag') {
-    await installOpenRAG(backends)
-  } else {
-    await installWorkbench(backends)
-  }
+  if (backends[choice])  return { key: choice, action: 'none' }
+  if (installed[choice]) return { key: choice, action: 'start' }
+  return                        { key: choice, action: 'install' }
 }
 
-async function installOpenRAG(backends) {
+// ─── startBackend ────────────────────────────────────────────────────────────
+// Starts a stopped but already-installed backend. Mutates `backends` in place.
+async function startBackend(key, backends) {
+  const isWorkbench = key === 'workbench'
+  const dir         = path.resolve(ROOT, '..', isWorkbench ? 'ai-workbench' : 'openrag')
+  const displayName = isWorkbench ? 'AI Workbench' : 'OpenRAG'
+  const suffix      = isWorkbench ? '/healthz' : '/health'
+  const timeout     = isWorkbench ? 180 : 300
+  const url         = isWorkbench ? backends.workbenchUrl : backends.openragUrl
+
+  log.info(`Starting existing ${displayName} install at ${chalk.cyan(dir)}`)
+  log.nl()
+  await runDockerCompose(dir)
+  await pollHealth(url, suffix, displayName, timeout)
+  backends[key] = true
+  log.ok(`${displayName} is running.`)
+  log.nl()
+}
+
+// keys come from collectKeys() — already written to .env.local, now also
+// injected into the workbench's own sibling .env for docker compose.
+async function installOpenRAG(backends, keys) {
   const dir = path.resolve(ROOT, '..', 'openrag')
-  fs.mkdirSync(dir, { recursive: true })
-  log.info(`Installing OpenRAG → ${chalk.dim(dir)}`)
+  log.rule()
+  log.info(`Installing OpenRAG`)
+  log.info(`  Location  ${chalk.cyan(dir)}`)
+  log.info(`  This dir is a sibling of ${chalk.dim(path.basename(ROOT))} — not inside it`)
+  log.rule()
   log.nl()
 
-  // Download compose + env
+  fs.mkdirSync(dir, { recursive: true })
+  log.info('Downloading docker-compose.yml …')
   await downloadFile(
     'https://raw.githubusercontent.com/langflow-ai/openrag/main/docker-compose.yml',
     path.join(dir, 'docker-compose.yml')
   )
+  log.info('Downloading .env template …')
   await downloadFile(
     'https://raw.githubusercontent.com/langflow-ai/openrag/main/.env.example',
     path.join(dir, '.env')
   )
 
-  // Need OpenAI key for OpenRAG to be useful
-  const { openaiKey } = await prompts({
-    type:    'invisible',
-    name:    'openaiKey',
-    message: 'OpenAI API key for OpenRAG (from platform.openai.com/api-keys):',
-  })
-  if (openaiKey) {
-    injectEnvValue(path.join(dir, '.env'), 'OPENAI_API_KEY', openaiKey)
+  // Seed the OpenAI key into the sibling .env so docker compose picks it up
+  if (keys.OPENAI_API_KEY) {
+    injectEnvValue(path.join(dir, '.env'), 'OPENAI_API_KEY', keys.OPENAI_API_KEY)
+    log.ok(`OPENAI_API_KEY written to ${chalk.dim(path.join(dir, '.env'))}`)
   }
+  log.nl()
 
-  // Boot
   await runDockerCompose(dir)
   await pollHealth(backends.openragUrl, '/health', 'OpenRAG', 300)
   log.ok('OpenRAG is running.')
+  log.info(`  Compose files  ${chalk.dim(dir)}`)
   log.nl()
 }
 
-async function installWorkbench(backends) {
+async function installWorkbench(backends, keys) {
   const dir = path.resolve(ROOT, '..', 'ai-workbench')
-  fs.mkdirSync(dir, { recursive: true })
-  log.info(`Installing AI Workbench → ${chalk.dim(dir)}`)
+  log.rule()
+  log.info(`Installing AI Workbench`)
+  log.info(`  Location  ${chalk.cyan(dir)}`)
+  log.info(`  This dir is a sibling of ${chalk.dim(path.basename(ROOT))} — not inside it`)
+  log.rule()
   log.nl()
 
-  // Download compose file and env template
+  fs.mkdirSync(dir, { recursive: true })
+  log.info('Downloading docker-compose.yml …')
   await downloadFile(
     'https://raw.githubusercontent.com/datastax/ai-workbench/main/docker-compose.yml',
     path.join(dir, 'docker-compose.yml')
   )
+  log.info('Downloading .env template …')
   await downloadFile(
     'https://raw.githubusercontent.com/datastax/ai-workbench/main/.env.example',
     path.join(dir, '.env')
   )
 
-  // OpenRouter is the default LLM provider — chat returns 503 without it.
-  // Astra credentials are optional: the local file driver works without them.
-  log.info('Configure AI Workbench  ' + chalk.dim('(leave blank to skip any key)'))
-  log.nl()
-
-  const wb = await prompts([
-    {
-      type:    'invisible',
-      name:    'openrouterKey',
-      message: `OpenRouter API key ${chalk.dim('(openrouter.ai/keys · needed for chat)')}:`,
-    },
-    {
-      type:    'invisible',
-      name:    'astraEndpoint',
-      message: `Astra DB endpoint ${chalk.dim('(optional · https://<id>-<region>.apps.astra.datastax.com)')}:`,
-    },
-    {
-      type:    'invisible',
-      name:    'astraToken',
-      message: `Astra DB token ${chalk.dim('(optional · AstraCS:…)')}:`,
-    },
-  ])
-
+  // Seed credentials into the sibling .env so docker compose picks them up.
+  // Keys were already collected in collectKeys() and written to .env.local.
   const envPath = path.join(dir, '.env')
-  if (wb.openrouterKey) injectEnvValue(envPath, 'OPENROUTER_API_KEY',    wb.openrouterKey)
-  if (wb.astraEndpoint) injectEnvValue(envPath, 'ASTRA_DB_API_ENDPOINT', wb.astraEndpoint)
-  if (wb.astraToken)    injectEnvValue(envPath, 'ASTRA_DB_APPLICATION_TOKEN', wb.astraToken)
+  if (keys.OPENROUTER_API_KEY)         injectEnvValue(envPath, 'OPENROUTER_API_KEY',         keys.OPENROUTER_API_KEY)
+  if (keys.ASTRA_DB_API_ENDPOINT)      injectEnvValue(envPath, 'ASTRA_DB_API_ENDPOINT',      keys.ASTRA_DB_API_ENDPOINT)
+  if (keys.ASTRA_DB_APPLICATION_TOKEN) injectEnvValue(envPath, 'ASTRA_DB_APPLICATION_TOKEN', keys.ASTRA_DB_APPLICATION_TOKEN)
 
+  // Always write OLLAMA_BASE_URL pointing at host.docker.internal.
+  // Inside the container, `localhost` is the container itself — Ollama runs on
+  // the host. The docker-compose.yml adds the `host.docker.internal:host-gateway`
+  // extra_host so this alias resolves on both macOS and Linux Docker Engine.
+  // Without this explicit value, the Workbench falls back to http://localhost:11434
+  // and every Ollama chat request fails with "fetch failed".
+  injectEnvValue(envPath, 'OLLAMA_BASE_URL', 'http://host.docker.internal:11434/v1')
+  log.ok(`Credentials written to ${chalk.dim(envPath)}`)
   log.nl()
+
   await runDockerCompose(dir)
   await pollHealth(backends.workbenchUrl, '/healthz', 'AI Workbench', 180)
   log.ok('AI Workbench is running.')
+  log.info(`  Compose files  ${chalk.dim(dir)}`)
   log.nl()
 }
 
-// ─── collectKeys ─────────────────────────────────────────────────────────────
-// Gathers API keys via invisible prompts. Only asks for what's relevant
-// based on which backends are detected.
-async function collectKeys(backends) {
+// ─── discoverWorkbenchConfig ─────────────────────────────────────────────────
+// _Basically_, queries the live workbench API to find workspaces, agents, and
+// services — then lets the user pick by name instead of pasting UUIDs.
+// Returns a partial env object ready to merge into keys.
+//
+// Docker networking gotcha: the Workbench runs inside a container. When an
+// Ollama LLM service is created via the UI while the workbench is running in
+// Docker, `endpointBaseUrl` is often stored as null in the backing database —
+// the UI shows OLLAMA_BASE_URL as a placeholder, but saving null means the
+// runtime falls back to its compiled-in default of http://localhost:11434,
+// which is the *container's* localhost (Ollama isn't there). We detect any
+// Ollama services with a null endpoint and fix them automatically.
+async function discoverWorkbenchConfig(baseUrl) {
   log.rule()
-  log.info('API keys — paste each one and press Enter. Leave blank to skip.')
-  log.rule()
+  log.info('Discovering AI Workbench configuration from live API …')
   log.nl()
 
-  const questions = []
-
-  if (backends.openrag) {
-    questions.push({
-      type:    'invisible',
-      name:    'OPENAI_API_KEY',
-      message: `OpenAI API key ${chalk.dim('(platform.openai.com/api-keys)')}:`,
-    })
-    questions.push({
-      type:    'invisible',
-      name:    'OPENRAG_API_KEY',
-      message: `OpenRAG API key ${chalk.dim('(optional — leave blank for local installs)')}:`,
-    })
+  const get = async (path) => {
+    try {
+      const res = await fetch(`${baseUrl}${path}`)
+      if (!res.ok) return []
+      const data = await res.json()
+      return data.items ?? []
+    } catch {
+      return []
+    }
   }
 
-  if (backends.workbench) {
-    questions.push({
-      type:    'invisible',
-      name:    'WORKBENCH_API_KEY',
-      message: `AI Workbench API key ${chalk.dim('(optional — leave blank for local installs)')}:`,
-    })
+  // Step 1 — pick workspace
+  const workspaces = await get('/api/v1/workspaces')
+  if (!workspaces.length) {
+    log.warn('No workspaces found on workbench — skipping auto-config.')
+    log.nl()
+    return {}
   }
 
-  questions.push({
-    type:    'invisible',
-    name:    'ELEVENLABS_API_KEY',
-    message: `ElevenLabs API key ${chalk.dim('(elevenlabs.io/app/settings/api-keys · optional)')}:`,
+  const { wsId } = await prompts({
+    type:    'select',
+    name:    'wsId',
+    message: 'Which workspace?',
+    choices: workspaces.map((w) => ({ title: `${chalk.bold(w.name)}  ${chalk.dim(w.workspaceId)}`, value: w.workspaceId })),
   })
+  if (!wsId) return {}
 
-  const answers = await prompts(questions)
+  // Steps 2-5 — pick agent, chunking service, embedding service, and check
+  // LLM services in parallel
+  const [agents, chunkers, embedders, llmServices] = await Promise.all([
+    get(`/api/v1/workspaces/${wsId}/agents`),
+    get(`/api/v1/workspaces/${wsId}/chunking-services`),
+    get(`/api/v1/workspaces/${wsId}/embedding-services`),
+    get(`/api/v1/workspaces/${wsId}/llm-services`),
+  ])
+
+  const pick = async (label, items, idField, nameField = 'name') => {
+    if (!items.length) { log.warn(`No ${label} found — skipping.`); return null }
+    if (items.length === 1) {
+      log.ok(`${label}: ${chalk.bold(items[0][nameField])}  ${chalk.dim('(only one available, auto-selected)')}`)
+      return items[0][idField]
+    }
+    const { id } = await prompts({
+      type:    'select',
+      name:    'id',
+      message: `Default ${label}?`,
+      choices: items.map((i) => ({
+        title: `${chalk.bold(i[nameField])}  ${chalk.dim(i.description ?? i[idField])}`,
+        value: i[idField],
+      })),
+    })
+    return id ?? null
+  }
+
+  const [agentId, chunkId, embedId] = await Promise.all([
+    pick('agent',             agents,   'agentId'),
+    pick('chunking service',  chunkers, 'chunkingServiceId'),
+    pick('embedding service', embedders,'embeddingServiceId'),
+  ])
+
+  // Fix any Ollama LLM services whose endpointBaseUrl is null.
+  // When null, the Workbench container hits http://localhost:11434 (itself),
+  // not the host. host.docker.internal resolves to the host gateway via the
+  // extra_hosts mapping in docker-compose.yml.
+  await fixOllamaEndpoints(baseUrl, wsId, llmServices)
+
   log.nl()
-  return answers
+
+  const result = { WORKBENCH_WORKSPACE_ID: wsId }
+  if (agentId)  result.WORKBENCH_DEFAULT_AGENT_ID             = agentId
+  if (chunkId)  result.WORKBENCH_CHUNKING_SERVICE_ID          = chunkId
+  if (embedId)  result.WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID = embedId
+  return result
+}
+
+// ─── fixOllamaEndpoints ───────────────────────────────────────────────────────
+// _Basically_, ensures every Ollama LLM service in the workspace has an explicit
+// endpointBaseUrl pointing at host.docker.internal. Without it, the Workbench
+// container falls back to http://localhost:11434 — its own loopback — and every
+// chat request fails with "ollama request failed: fetch failed".
+async function fixOllamaEndpoints(baseUrl, wsId, llmServices) {
+  const HOST_OLLAMA = 'http://host.docker.internal:11434/v1'
+
+  const broken = llmServices.filter(
+    (s) => s.provider === 'ollama' && !s.endpointBaseUrl
+  )
+  if (!broken.length) return
+
+  log.warn(`Found ${broken.length} Ollama LLM service(s) with no endpoint URL — fixing for Docker …`)
+
+  for (const svc of broken) {
+    try {
+      const res = await fetch(
+        `${baseUrl}/api/v1/workspaces/${wsId}/llm-services/${svc.llmServiceId}`,
+        {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ endpointBaseUrl: HOST_OLLAMA }),
+        }
+      )
+      if (res.ok) {
+        log.ok(`  ${chalk.bold(svc.name)}  endpoint → ${chalk.dim(HOST_OLLAMA)}`)
+      } else {
+        log.warn(`  ${chalk.bold(svc.name)}  PATCH failed (${res.status}) — set endpointBaseUrl manually`)
+      }
+    } catch (err) {
+      log.warn(`  ${chalk.bold(svc.name)}  PATCH error: ${err.message}`)
+    }
+  }
+}
+
+// ─── collectKeys ─────────────────────────────────────────────────────────────
+// Gathers API keys for the chosen backend. Reads any existing .env.local first
+// — if a key already has a value, shows a masked preview and asks whether to
+// keep it or replace it. Only prompts for the new value if replacing.
+async function collectKeys(backends, backendKey) {
+  // Load whatever is already in .env.local so we can show existing values
+  const existing = loadEnvFile(path.join(ROOT, '.env.local'))
+
+  log.rule()
+  log.info('API keys — existing values shown masked. Press Enter to keep.')
+  log.rule()
+  log.nl()
+
+  // Which keys are relevant for this backend selection
+  const needed = []
+  if (backends.openrag || backendKey === 'openrag') {
+    needed.push({ name: 'OPENAI_API_KEY',   label: `OpenAI API key ${chalk.dim('(platform.openai.com/api-keys)')}` })
+    needed.push({ name: 'OPENRAG_API_KEY',  label: `OpenRAG API key ${chalk.dim('(optional)')}` })
+  }
+  if (backends.workbench || backendKey === 'workbench') {
+    needed.push({ name: 'WORKBENCH_API_KEY',          label: `AI Workbench API key ${chalk.dim('(optional — leave blank for local installs)')}` })
+    needed.push({ name: 'OPENROUTER_API_KEY',         label: `OpenRouter API key ${chalk.dim('(openrouter.ai/keys · needed for chat)')}` })
+    needed.push({ name: 'ASTRA_DB_API_ENDPOINT',      label: `Astra DB endpoint ${chalk.dim('(optional)')}` })
+    needed.push({ name: 'ASTRA_DB_APPLICATION_TOKEN', label: `Astra DB token ${chalk.dim('(optional · AstraCS:…)')}` })
+    // WORKBENCH_WORKSPACE_ID, WORKBENCH_DEFAULT_AGENT_ID, WORKBENCH_CHUNKING_SERVICE_ID,
+    // and WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID are auto-discovered in discoverWorkbenchConfig()
+  }
+  needed.push({ name: 'ELEVENLABS_API_KEY', label: `ElevenLabs API key ${chalk.dim('(elevenlabs.io/app/settings/api-keys · optional)')}` })
+
+  const result = {}
+
+  for (const { name, label } of needed) {
+    // Treat blank/whitespace as absent — .env.example seeds empty placeholders
+    const current = existing[name]?.trim() || null
+
+    if (current) {
+      // Show masked: first 4 chars + asterisks + last 4 chars
+      const masked = maskKey(current)
+      const { action } = await prompts({
+        type:    'select',
+        name:    'action',
+        message: `${label}:  ${chalk.dim(masked)}`,
+        choices: [
+          { title: chalk.dim(`Keep  ${masked}`), value: 'keep'    },
+          { title: 'Replace',                    value: 'replace' },
+        ],
+      })
+      if (!action || action === 'keep') {
+        result[name] = current  // carry the existing value forward
+        continue
+      }
+    }
+
+    // No existing value, or user chose to replace — prompt for the new value
+    const { value } = await prompts({
+      type:    'invisible',
+      name:    'value',
+      message: `${label}:`,
+    })
+    if (value) result[name] = value
+  }
+
+  log.nl()
+  return result
+}
+
+// Returns a masked version of a key: first 4 + ****** + last 4.
+// Short values (≤8 chars) are fully masked.
+function maskKey(val) {
+  if (val.length <= 8) return '*'.repeat(val.length)
+  return val.slice(0, 4) + '••••••••' + val.slice(-4)
 }
 
 // ─── writeEnvLocal ───────────────────────────────────────────────────────────
@@ -476,11 +684,16 @@ async function writeEnvLocal(backends, keys) {
   })
 
   fs.writeFileSync(localPath, output.join('\n'), 'utf8')
-  log.ok('.env.local written')
+  log.ok(`.env.local written  ${chalk.dim(localPath)}`)
 
   const set     = Object.keys(overrides)
-  const skipped = ['OPENAI_API_KEY', 'OPENRAG_API_KEY', 'WORKBENCH_API_KEY', 'ELEVENLABS_API_KEY']
-    .filter((k) => !(k in overrides))
+  const skipped = [
+    'OPENAI_API_KEY', 'OPENRAG_API_KEY',
+    'WORKBENCH_API_KEY', 'WORKBENCH_WORKSPACE_ID', 'WORKBENCH_DEFAULT_AGENT_ID',
+    'WORKBENCH_CHUNKING_SERVICE_ID', 'WORKBENCH_DEFAULT_EMBEDDING_SERVICE_ID',
+    'OPENROUTER_API_KEY', 'ASTRA_DB_API_ENDPOINT', 'ASTRA_DB_APPLICATION_TOKEN',
+    'ELEVENLABS_API_KEY',
+  ].filter((k) => !(k in overrides))
 
   if (set.length)     log.ok(`Keys set:     ${chalk.green(set.join(', '))}`)
   if (skipped.length) log.info(`Skipped:      ${chalk.dim(skipped.join(', '))}`)
@@ -489,15 +702,56 @@ async function writeEnvLocal(backends, keys) {
 
 // ─── launchApp ───────────────────────────────────────────────────────────────
 async function launchApp() {
+  // Kill any process already holding port 3001 — happens when a previous
+  // wizard run crashed before the process exited cleanly.
+  const pid = portPid(3001)
+  if (pid) {
+    log.warn(`Port 3001 is in use by PID ${pid} — stopping it first …`)
+    try {
+      process.kill(pid)
+      // Give the OS a moment to release the port before we bind it again
+      await sleep(1000)
+      log.ok('Previous process stopped.')
+    } catch {
+      log.warn('Could not stop the process — you may need to free port 3001 manually.')
+    }
+    log.nl()
+  }
+
   log.rule()
   console.log(` ${chalk.bold.cyan('Starting killrctx')} → ${chalk.underline('http://localhost:3001')}`)
   log.rule()
   log.nl()
 
-  const child = spawn('npm', ['run', 'dev'], { stdio: 'inherit', cwd: ROOT })
-  process.on('SIGINT',  () => child.kill('SIGINT'))
-  process.on('SIGTERM', () => child.kill('SIGTERM'))
+  // detached: true puts the child in its own process group so we can kill
+  // the whole group (npm + next + next-server) with a single -pid signal.
+  const child = spawn('npm', ['run', 'dev'], { stdio: 'inherit', cwd: ROOT, detached: true })
+
+  const stop = (sig) => {
+    try {
+      // Negative PID kills the entire process group — catches next-server
+      // grandchildren that plain child.kill() misses.
+      process.kill(-child.pid, sig)
+    } catch {
+      child.kill(sig)  // fallback if the group kill fails
+    }
+    child.once('exit', () => process.exit(0))
+  }
+  process.on('SIGINT',  () => stop('SIGINT'))
+  process.on('SIGTERM', () => stop('SIGTERM'))
   child.on('exit', (code) => process.exit(code ?? 0))
+}
+
+// Returns the PID listening on `port`, or null if the port is free.
+// Uses lsof which is available on macOS and most Linux distros.
+function portPid(port) {
+  try {
+    const out = execSync(`lsof -ti tcp:${port}`, { stdio: 'pipe' }).toString().trim()
+    const pid = parseInt(out, 10)
+    return Number.isFinite(pid) ? pid : null
+  } catch {
+    return null  // lsof exits non-zero when nothing is listening
+  }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -535,7 +789,8 @@ function injectEnvValue(filePath, key, value) {
 
 // Run `docker compose up -d` in a directory, streaming output
 function runDockerCompose(cwd) {
-  log.info('Running docker compose up -d …')
+  log.info(`Running docker compose up -d`)
+  log.info(`  Working dir  ${chalk.dim(cwd)}`)
   log.nl()
   const child = spawn('docker', ['compose', 'up', '-d'], { cwd, stdio: 'inherit' })
   return waitForChild(child, 'docker compose up -d')
@@ -578,7 +833,8 @@ async function pollHealth(baseUrl, suffix, label, maxSeconds) {
 
   spinner.fail(`${label} did not become ready within ${maxSeconds}s.`)
   log.warn(`Check logs: docker compose logs -f  (in the install directory)`)
-  process.exit(1)
+  // Throw instead of process.exit so main() can still write .env.local before stopping.
+  throw new Error(`${label} health check timed out after ${maxSeconds}s`)
 }
 
 function sleep(ms) {

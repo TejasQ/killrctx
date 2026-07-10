@@ -26,7 +26,10 @@ import { fileURLToPath } from 'url'
 
 // ESM-compatible require for CJS packages (prompts, cac)
 const require = createRequire(import.meta.url)
-const prompts = require('prompts')
+// Wrap prompts so Ctrl-C during any prompt exits immediately instead of
+// silently returning undefined and letting the wizard continue.
+const _prompts = require('prompts')
+const prompts  = (q, opts) => _prompts(q, { onCancel: () => process.exit(0), ...opts })
 const { cac }  = require('cac')
 
 import chalk from 'chalk'
@@ -723,19 +726,23 @@ async function launchApp() {
   log.rule()
   log.nl()
 
-  // detached: true puts the child in its own process group so we can kill
-  // the whole group (npm + next + next-server) with a single -pid signal.
-  const child = spawn('npm', ['run', 'dev'], { stdio: 'inherit', cwd: ROOT, detached: true })
+  // detached: true gives next its own pgid so we can kill the whole group
+  // (next + next-server) with a single negative-pid signal. This is necessary
+  // because setup.mjs inherits its pgid from whatever launched the terminal
+  // (e.g. Bob), so Ctrl-C from the terminal does NOT reach next's processes —
+  // we have to forward the signal ourselves.
+  const nextBin = path.join(ROOT, 'node_modules', '.bin', 'next')
+  const child = spawn(nextBin, ['dev', '-p', '3001'], { stdio: 'inherit', cwd: ROOT, detached: true })
 
+  let stopping = false
   const stop = (sig) => {
+    if (stopping) return   // guard against double-signal
+    stopping = true
     try {
-      // Negative PID kills the entire process group — catches next-server
-      // grandchildren that plain child.kill() misses.
-      process.kill(-child.pid, sig)
+      process.kill(-child.pid, sig)  // kill the entire next process group
     } catch {
-      child.kill(sig)  // fallback if the group kill fails
+      child.kill(sig)  // fallback if group kill fails
     }
-    child.once('exit', () => process.exit(0))
   }
   process.on('SIGINT',  () => stop('SIGINT'))
   process.on('SIGTERM', () => stop('SIGTERM'))

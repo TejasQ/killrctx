@@ -151,7 +151,7 @@ export default function Home() {
                 className="block px-4 py-3 pr-12"
               >
                 <div className="flex items-center gap-2.5">
-                  <BackendLogo backend={nb.rag_backend} />
+                  <BackendLogo backend={nb.rag_backend} health={health} />
                   <div>
                     <div className="text-sm font-medium">{nb.title}</div>
                     <div className="text-xs text-muted">
@@ -301,27 +301,38 @@ function BackendPicker({
 // Rendered left of the notebook name on the home page. OpenRAG uses just the
 // dog portion of logo-openrag.png (cropped via CSS); Astra uses its standalone
 // icon mark logo-astra.png. Both are 20×20px to sit flush with the text line.
+//
+// A small dot badge is overlaid on the bottom-right corner of the icon:
+//   green  = backend is up
+//   red    = backend is down
+//   hidden = health not yet known (first poll still in flight)
 // ============================================================================
-function BackendLogo({ backend }: { backend?: string }) {
+function BackendLogo({ backend, health }: { backend?: string; health: BackendHealth }) {
+  const key    = backend === "workbench" ? "workbench" : "openrag";
+  const status = health[key];
+
+  const dot = status === "unknown" ? null : (
+    <span
+      aria-label={status === "up" ? "online" : "offline"}
+      className={[
+        "absolute bottom-0 right-0 h-2 w-2 rounded-full ring-1 ring-panel",
+        status === "up" ? "bg-green-400" : "bg-red-500",
+      ].join(" ")}
+    />
+  );
+
   if (backend === "workbench") {
     return (
-      <img
-        src="/assets/logo-astra.png"
-        alt="Astra"
-        width={20}
-        height={20}
-        className="shrink-0 rounded-sm"
-      />
+      <div className="relative shrink-0 h-5 w-5">
+        <img src="/assets/logo-astra.png" alt="Astra" width={20} height={20} className="rounded-sm" />
+        {dot}
+      </div>
     );
   }
-  // Default to OpenRAG — use the official dog SVG icon.
   return (
-    <img
-      src="/assets/logo-openrag-dog.svg"
-      alt="OpenRAG"
-      width={20}
-      height={20}
-      className="shrink-0"
-    />
+    <div className="relative shrink-0 h-5 w-5">
+      <img src="/assets/logo-openrag-dog.svg" alt="OpenRAG" width={20} height={20} />
+      {dot}
+    </div>
   );
 }

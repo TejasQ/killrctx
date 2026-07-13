@@ -11,3 +11,8 @@
 - [x] TASK-07: [UI] Add `offline` prop to `ChatPanel` — disable send, input, new conv, delete conv; show offline notice when offline
 - [x] TASK-08: [UI] Add `offline` prop to `StudioPanel` — disable type cards, generate, delete note, topic input when offline
 - [x] TASK-09: [UI] Wire `offline` at the notebook page level — call `useBackendHealth()`, derive `offline` from `notebook.rag_backend`, pass to all three panels
+- [x] TASK-10: [UI] Add dot badge to `BackendLogo` on home page — green = up, red = down, hidden = unknown (REQ-005)
+- [x] TASK-11: [UI] Add Online / Offline — read only status pill to notebook header — always shown once health is known (REQ-005)
+- [x] TASK-12: [UI] Add `disabled` prop to `ModelPickerPopover` — forwarded to trigger button; callers pass `disabled={offline}` with dimmed trigger span (REQ-004)
+- [x] TASK-13: [UI] Hide document checkboxes in `SourcesPanel` when offline — `pointer-events-none opacity-0` (REQ-004)
+- [x] TASK-14: [UI] Add Read only pill to offline notebook cards on home page — vertically centred in card flex row (REQ-005)

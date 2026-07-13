@@ -91,11 +91,11 @@ known values on the next successful poll.
 
 ---
 
-## 5. Home page: `BackendPicker`
+## 5. Home page: `BackendPicker`, `BackendLogo`, notebook cards
 
 **File:** `src/app/page.tsx`
 
-`Home` calls `useBackendHealth()`. Passes `health` down to `BackendPicker`.
+`Home` calls `useBackendHealth()`. Passes `health` down to `BackendPicker` and `BackendLogo`.
 
 `BackendPicker` already shows both options as always-enabled. Change:
 
@@ -104,11 +104,35 @@ known values on the next successful poll.
 - Disabled options show a dim `(offline)` suffix instead of the URL.
 - `'unknown'` = treat as enabled (don't block on first paint).
 
-No other changes to `page.tsx`.
+### `BackendLogo` — dot badge (REQ-005)
+
+`BackendLogo` accepts `health: BackendHealth`. Renders the platform icon wrapped
+in a `relative` container. A `span` is absolutely positioned bottom-right:
+
+```tsx
+// Green dot = up, red dot = down, no dot = unknown
+<span className="absolute bottom-0 right-0 h-2 w-2 rounded-full ring-1 ring-panel
+  bg-green-400 | bg-red-500" aria-label="online | offline" />
+```
+
+### Notebook card — Read only pill (REQ-005)
+
+Each card's outer `flex items-center` row gains a trailing pill when
+`health[nb.rag_backend] === "down"`:
+
+```tsx
+<span className="rounded-full border border-amber-600/50 bg-amber-950/60
+  px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-400">
+  Read only
+</span>
+```
+
+Placed as the last child of the flex row so it centres vertically against both
+the title and date lines.
 
 ---
 
-## 6. Notebook page: `offline` prop
+## 6. Notebook page: `offline` prop, status pill, model pickers
 
 **File:** `src/app/notebooks/[id]/page.tsx`
 
@@ -124,6 +148,26 @@ const offline =
 
 Pass `offline: boolean` to all three panels.
 
+### Notebook header additions (REQ-005)
+
+- The backend logo `<img>` is replaced by the `BackendLogo` component (same as
+  home page) — not applicable here since the header uses an inline `<img>`.
+- A status pill sits beside the notebook title, always shown once health is known:
+  - `"up"` → green **Online** pill
+  - `"down"` → amber **Offline — read only** pill
+  - `"unknown"` → no pill
+
+### Model pickers (REQ-004 extension)
+
+`ModelPickerPopover` gains `disabled?: boolean`. When `true`, the trigger
+`<button>` is disabled (`disabled={saving || disabled}`). Callers pass
+`disabled={offline}` and apply `pointer-events-none opacity-50` to the trigger
+child span.
+
+Three pickers affected:
+- Header LLM picker (OpenRAG and Workbench)
+- Sources panel embedding picker
+
 ### SourcesPanel changes (when `offline`)
 
 - `+ Add source(s)` button: `disabled`
@@ -131,8 +175,9 @@ Pass `offline: boolean` to all three panels.
 - URL button: `disabled` (and URL input if open: hidden)
 - Bulk delete button: `disabled`
 - Per-row Retry button: `disabled`
+- Embedding model picker: `disabled` (REQ-004 extension — see model pickers above)
+- Document checkboxes: `pointer-events-none opacity-0` (selection only scopes chat)
 - No new UI elements needed — `disabled` on existing buttons is enough.
-- Do NOT disable checkboxes (read = fine; the delete action that consumes selection is already disabled).
 
 ### ChatPanel changes (when `offline`)
 
@@ -172,11 +217,15 @@ Add `offline: boolean`. Guard type cards, generate, delete note.
 
 | REQ-ID | Design item |
 |--------|-------------|
-| REQ-001 | `HealthBanner` replaces `HealthGate`; app loads without waiting for backend |
+| REQ-001 | `/api/health` probes both backends in parallel |
 | REQ-002 | `useBackendHealth` polls every 30 s; banner appears/disappears automatically |
 | REQ-003 | `BackendPicker` disables offline/unconfigured options; uses `useBackendHealth` |
 | REQ-004 | `offline` prop in all three panels; all write actions disabled; reads allowed |
-| REQ-004 | `/api/health` probes both backends in parallel |
+| REQ-004 | Model pickers disabled (`ModelPickerPopover` gains `disabled` prop) |
+| REQ-004 | Document checkboxes hidden when offline |
+| REQ-005 | `BackendLogo` dot badge on home page |
+| REQ-005 | Read only pill on offline notebook cards (home page) |
+| REQ-005 | Online / Offline — read only status pill in notebook header |
 
 ---
 

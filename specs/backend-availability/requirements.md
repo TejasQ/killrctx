@@ -81,11 +81,41 @@ degraded read-only mode rather than refusing to load or error out.
   - Note rename (inline title edit).
   - Notebook rename.
   - Notebook delete.
+  - Model pickers (LLM and embedding) — visible but `disabled`, dimmed with
+    `opacity-50 pointer-events-none`. Tooltip reads `"Backend offline"`.
+  - Document checkboxes in Sources panel — `opacity-0 pointer-events-none`
+    (selection only scopes chat queries, which cannot be sent anyway).
 - **Enabled while offline** (purely read-only, no mutations):
   - Browsing all existing notes (read, expand, fullscreen, copy text).
   - Reading all messages in all conversations.
   - Listening to an already-generated podcast (audio URL is stored in SQLite).
   - Switching between conversations.
+
+### REQ-005 — Always-visible connection state indicators
+Users must always be able to tell at a glance whether a notebook's backend is
+reachable, on both the home page and inside a notebook.
+
+**Acceptance criteria:**
+- **Home page — dot badge on backend logo:**
+  - A small coloured circle is overlaid on the bottom-right corner of each
+    notebook card's backend logo icon.
+  - Green (`bg-green-400`) = backend is `"up"`.
+  - Red (`bg-red-500`) = backend is `"down"`.
+  - No dot when status is `"unknown"` (first poll still in flight).
+  - A `ring-1 ring-panel` halo cuts the dot cleanly from the icon pixels.
+  - `aria-label="online"` / `"offline"` for accessibility.
+- **Home page — Read only pill on offline notebook cards:**
+  - When a notebook's backend is `"down"`, a pill reading **Read only** appears
+    inline in the card, vertically centred against the full card height.
+  - Pill style matches the amber offline pill used inside the notebook header.
+  - Not shown when status is `"up"` or `"unknown"`.
+- **Notebook header — status pill:**
+  - A pill is always rendered in the notebook header (once health is known).
+  - Green (`border-green-600/50 bg-green-950/60 text-green-400`) reads **Online**
+    when the backend is `"up"`.
+  - Amber (`border-amber-600/50 bg-amber-950/60 text-amber-400`) reads
+    **Offline — read only** when the backend is `"down"`.
+  - No pill when status is `"unknown"`.
 
 ---
 

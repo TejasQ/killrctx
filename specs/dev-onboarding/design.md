@@ -2,7 +2,7 @@
 
 ## Overview
 
-`scripts/setup.mjs` is a single Node ESM script (~300 lines). It requires no
+`scripts/setup.mjs` is a single Node ESM script (~200 lines). It requires no
 build step — `node scripts/setup.mjs` runs directly. It imports three npm
 packages that we add to `devDependencies`: **ora** (braille spinners), **chalk**
 (colour), and **prompts** (interactive CLI inputs). No TypeScript — keeping the
@@ -47,7 +47,6 @@ import cac from 'cac'
 const cli = cac('killrctx')
 cli.version('0.1.0')
 cli.help()
-cli.option('--skip-docker', 'Skip Docker runtime check')
 cli.option('--skip-launch', 'Write .env.local but do not start the app')
 cli
   .command('[...args]', 'Interactive setup wizard')
@@ -61,13 +60,13 @@ after `main()`.
 
 ```
 main(opts)
-  ├── printBanner()           braille banner + title
-  ├── detectBackends()        probe OpenRAG + Workbench in parallel
-  ├── ensureDocker()          check / install Docker runtime   [skipped if --skip-docker]
-  ├── handleNoBackends()      backend install wizard
-  ├── collectKeys()           prompt loop for API keys (REQ-003)
-  ├── writeEnvLocal()         merge .env.example + answers (REQ-005)
-  └── launchApp()             spawn next dev                   [skipped if --skip-launch]
+  ├── printBanner()              braille banner + title
+  ├── detectBackends()           probe OpenRAG + Workbench in parallel
+  ├── promptBackendChoice()      show running backends only; exit with instructions if none
+  ├── collectKeys()              prompt loop for API keys (REQ-003)
+  ├── discoverWorkbenchConfig()  read-only: query live Workbench API for resource IDs
+  ├── writeEnvLocal()            merge .env.example + answers (REQ-005)
+  └── launchApp()                spawn next dev                [skipped if --skip-launch]
 ```
 
 ### printBanner()
@@ -110,87 +109,25 @@ Result is printed as two status lines showing the actual URL probed:
 The resolved URLs are returned so `writeEnvLocal()` can use them to set
 `OPENRAG_URL` / `WORKBENCH_URL` in `.env.local` rather than hardcoding defaults.
 
-### ensureDocker() → `boolean`
+### promptBackendChoice()
 
-Called before `handleNoBackends()`. Runs `docker info` silently
-(`execSync('docker info', { stdio: 'ignore' })`).
-
-If it succeeds → returns `true`, nothing to do.
-
-If it fails → Docker CLI is missing or no daemon is running. Presents:
+Only shows backends that are currently running. If no backend is running, prints
+per-platform start instructions and exits 0 with a friendly message:
 
 ```
-  ✗  No Docker runtime detected.
+ℹ  No backend is running. Start one first, then re-run npm run init.
 
-  Docker is needed to install OpenRAG or AI Workbench.
-  Install one automatically?
-    ❯ Colima          (recommended · lightweight · macOS/Linux · ~2 min)
-      Docker Desktop  (GUI app · macOS/Windows/Linux · ~5 min)
-      Cancel setup
+  OpenRAG (recommended):
+    https://github.com/langflow-ai/openrag — follow Quick Start
+    Default URL: http://localhost:3000
+
+  AI Workbench:
+    https://github.com/datastax/ai-workbench — follow Quick Start
+    Default URL: http://localhost:8080
 ```
 
-**Colima install path** (macOS/Linux only):
-1. Checks `brew` is available (`which brew`). If not, installs Homebrew first:
-   - Downloads and runs the official Homebrew install script via
-     `spawn('/bin/bash', ['-c', '$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)'], { stdio: 'inherit' })`.
-2. Runs `brew install colima docker` (both needed — `colima` is the runtime,
-   `docker` is the CLI client).
-3. Runs `colima start` and waits for it to exit cleanly.
-4. Re-checks `docker info`. If succeeds → returns `true` and continues.
-5. On any error → prints failure message and exits 1.
-
-**Docker Desktop install path**:
-- On macOS: prints the download URL (`https://docs.docker.com/desktop/setup/install/mac-install/`) and instructs the user to install it manually, then pauses with "Press Enter when Docker Desktop is running…". Re-checks `docker info` after Enter.
-- On Linux: prints the `apt`/`dnf` install instructions and pauses similarly.
-- On Windows: prints the download URL and pauses.
-- _Reason Docker Desktop is not auto-installed:_ it requires accepting a GUI license agreement; automation would silently skip that. Manual install is the right call.
-
-**Cancel path:** calls `process.exit(0)` with a friendly goodbye message.
-
-After `ensureDocker()` returns `true`, the backend install menu is shown normally.
-
-### handleNoBackends()
-
-Only called when `openrag === false && workbench === false`.
-
-Calls `ensureDocker()` first, then presents the backend menu.
-
-Presents a `prompts.select` menu:
-```
-No backend detected. Install one automatically?
-  ❯ OpenRAG        (open-source · Docker · ~5 min)
-    AI Workbench   (DataStax · Docker · ~3 min)
-    Skip for now
-```
-
-**OpenRAG install path:**
-1. `mkdir -p ../openrag`
-2. Downloads `https://raw.githubusercontent.com/langflow-ai/openrag/main/docker-compose.yml`
-   into `../openrag/docker-compose.yml` via `fetch()` + `fs.writeFile`.
-3. Downloads `https://raw.githubusercontent.com/langflow-ai/openrag/main/.env.example`
-   into `../openrag/.env` via `fetch()` + `fs.writeFile`.
-4. Prompts (invisible) for `OPENAI_API_KEY`, writes it into `../openrag/.env`
-   using the same line-replace helper used in `writeEnvLocal()`.
-5. Runs `spawn('docker', ['compose', 'up', '-d'], { cwd: '../openrag', stdio: 'inherit' })`.
-   Waits for the child to exit (non-zero → error + exit 1).
-6. Polls `${openragUrl}/health` every 5 s, up to 5 min.
-   Ora spinner shows `⠋ Starting OpenRAG… (42s elapsed)`.
-7. On health success → sets `openrag = true`, continues to `collectKeys()`.
-8. On 5-min timeout → prints tips (`docker compose logs`) and exits 1.
-
-**Workbench install path:**
-1. `mkdir -p ../ai-workbench`
-2. Downloads `https://raw.githubusercontent.com/datastax/ai-workbench/main/docker-compose.yml`
-   into `../ai-workbench/docker-compose.yml`.
-3. Runs `spawn('docker', ['compose', 'up', '-d'], { cwd: '../ai-workbench', stdio: 'inherit' })`.
-4. Polls `${workbenchUrl}/healthz` every 5 s, up to 3 min.
-5. On health success → sets `workbench = true`, continues to `collectKeys()`.
-6. On 3-min timeout → prints tips and exits 1.
-
-**Skip path:** continues directly to `collectKeys()` with no backend configured.
-
-All Docker output streams via `stdio: 'inherit'`. The ora spinner runs on a
-`setInterval` alongside the child process so elapsed time is always visible.
+If exactly one backend is running it is selected automatically. If both are
+running, a `prompts.select` menu lets the user choose.
 
 ### collectKeys()
 
@@ -200,7 +137,6 @@ Runs a `prompts` sequence. Answers are returned as an object:
 type Keys = {
   OPENAI_API_KEY:      string  // required when openrag present
   OPENRAG_API_KEY:     string  // optional
-  WORKBENCH_API_KEY:   string  // optional, only when workbench present
   ELEVENLABS_API_KEY:  string  // optional always
 }
 ```
@@ -208,8 +144,29 @@ type Keys = {
 Prompt rules:
 - Use `prompts({ type: 'invisible' })` for all API key inputs (no echo).
 - If a backend is NOT detected, skip its key prompts entirely.
+- Workbench path collects connection URL only — no Astra/OpenRouter key prompts.
 - Each prompt has a descriptive `message` (e.g. `"OpenAI API key (from platform.openai.com/api-keys)"`)
   and a `hint` showing `"Leave blank to skip"` for optional keys.
+
+### discoverWorkbenchConfig() → `WorkbenchIds`
+
+Only called when Workbench is detected. Queries the live Workbench API using
+read-only endpoints to discover available workspaces, agents, chunking services,
+and embedding services. Presents `prompts.select` menus so the user picks by
+name rather than pasting UUIDs.
+
+```ts
+type WorkbenchIds = {
+  WORKBENCH_WORKSPACE_ID:  string
+  WORKBENCH_AGENT_ID:      string
+  WORKBENCH_CHUNKING_ID:   string
+  WORKBENCH_EMBEDDING_ID:  string
+}
+```
+
+No mutations are made to the Workbench instance. If any API call fails or
+returns an empty list, the function falls back to a free-text `prompts` input
+for that specific ID.
 
 ### writeEnvLocal()
 
@@ -218,9 +175,8 @@ Prompt rules:
    comments and blank lines using a simple line-by-line parser — no external lib).
 3. For each key the wizard collected, find the matching line and replace its
    value in-place.
-4. Also write the resolved URL vars (from the `detectBackends` return value,
-   or defaults if the user just installed):
-   - If `openrag` detected/installed: `OPENRAG_URL=<openragUrl>`
+4. Also write the resolved URL vars (from the `detectBackends` return value):
+   - If `openrag` detected: `OPENRAG_URL=<openragUrl>`
    - If `workbench` detected: `WORKBENCH_URL=<workbenchUrl>`
 5. If `.env.local` already exists, rename it to `.env.local.bak`.
 6. Write the merged result to `.env.local`.
@@ -241,11 +197,34 @@ Prints a success summary first:
 ─────────────────────────────────────────────
   ✓ .env.local written
   ✓ Keys set: OPENAI_API_KEY, ELEVENLABS_API_KEY
-  ─ Skipped: OPENRAG_API_KEY, WORKBENCH_API_KEY
+  ─ Skipped: OPENRAG_API_KEY
 
   Starting killrctx → http://localhost:3001
 ─────────────────────────────────────────────
 ```
+
+---
+
+## Removed in v2 (detect-and-connect)
+
+These functions existed in the v1 design and were removed when the wizard was
+simplified to detect-and-connect only. They are preserved as a future option in
+[`requirements.md`](./requirements.md) under "Future option — automated install".
+
+| Function | Reason removed |
+|----------|---------------|
+| `ensureDocker()` | No Docker operations remain — nothing to check |
+| `installOpenRAG()` | Install path deferred; compose format changes make this brittle |
+| `installWorkbench()` | Install path deferred; host.docker.internal + Ollama patching differ per platform |
+| `fixOllamaEndpoints()` | Install-only concern; not needed for connect path |
+| `detectInstalledDirs()` | Checked for stopped installs on disk — no installs means nothing to detect |
+| `resolveInstalledDir()` | Multi-install picker — no installs means no dirs to resolve |
+| `startBackend()` | `docker compose up -d` for stopped installs — deferred with install path |
+| `runDockerCompose()` | Helper for compose child-process spawning — deferred with install path |
+| `pollHealth()` | Startup health-check polling — only needed during install |
+| `waitForChild()` | Generic child-process wait helper — no child processes spawned |
+| `downloadFile()` | compose file + .env.example download — deferred with install path |
+| `sleep()` | Used only in polling loops — polling removed |
 
 ---
 
@@ -275,24 +254,23 @@ The `## Quick start` section is replaced with:
 ```markdown
 ## Quick start
 
-```bash
-git clone https://github.com/…/killrctx
-cd killrctx
-npm install
-npm run init
+1. Start a backend:
+   - **OpenRAG** — https://github.com/langflow-ai/openrag (follow Quick Start)
+   - **AI Workbench** — https://github.com/datastax/ai-workbench (follow Quick Start)
+
+2. Clone and run the wizard:
+   ```bash
+   git clone https://github.com/…/killrctx
+   cd killrctx
+   npm install
+   npm run init
+   ```
+
+3. Open http://localhost:3001 — done.
 ```
 
-`npm run init` is an interactive wizard that:
-1. Detects OpenRAG / AI Workbench running locally
-2. Offers to install OpenRAG via Docker if nothing is found
-3. Collects your API keys (OpenAI, ElevenLabs)
-4. Writes `.env.local` and starts the app
-
-Open http://localhost:3001 — done.
-```
-
-The manual `cp .env.example .env` / `docker compose` flow moves under a
-`<details>` collapsible labelled **Manual setup**.
+The manual `cp .env.example .env` flow moves under a `<details>` collapsible
+labelled **Manual setup**.
 
 ---
 
@@ -314,7 +292,8 @@ Versions: chalk@5 (ESM), ora@8 (ESM), prompts@2 (CJS, but we import it in
 | REQ-001 | `scripts/setup.mjs` + `package.json` `"init"` / `"setup"` scripts |
 | REQ-002 | `detectBackends()` — parallel fetch with 3 s timeout |
 | REQ-003 | `collectKeys()` — invisible prompts per detected backend |
-| REQ-004 | `handleNoBackends()` — select menu, Docker install, Workbench notice |
+| REQ-004 | `promptBackendChoice()` — exit with start instructions when no backend found |
+| REQ-004a | `discoverWorkbenchConfig()` — read-only API query, select by name |
 | REQ-005 | `writeEnvLocal()` — merge .env.example, backup existing |
 | REQ-006 | `launchApp()` — spawn next dev, signal forwarding |
 | REQ-007 | `ora` + `chalk` throughout, braille frames, symbol+colour table |

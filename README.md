@@ -43,6 +43,13 @@ algorithm.
 
 ## Quick start
 
+**Step 1 — start a backend** (pick one):
+
+- **OpenRAG** — [quick start](https://github.com/langflow-ai/openrag) · default URL: `http://localhost:3000`
+- **AI Workbench** — [quick start](https://github.com/datastax/ai-workbench) · default URL: `http://localhost:8080`
+
+**Step 2 — run the wizard:**
+
 ```bash
 git clone https://github.com/datastax/killrctx
 cd killrctx
@@ -50,47 +57,38 @@ npm install
 npm run init
 ```
 
-`npm run init` is an interactive wizard that handles everything:
+`npm run init` detects which backend is running, then:
 
-1. **Detects** OpenRAG and AI Workbench already running locally
-2. **Installs Docker** (Colima) automatically if needed
-3. **Installs a backend** — OpenRAG or AI Workbench — via Docker if none found
-4. **Collects your API keys** (OpenAI, ElevenLabs) with invisible input
-5. **Writes `.env.local`** and starts the app
+- **Detects** OpenRAG / AI Workbench running locally
+- **Collects your API keys** (OpenAI, ElevenLabs) with invisible input
+- **Writes `.env.local`** and starts the app
 
-Open **http://localhost:3001** — done.
+**Step 3 —** open **http://localhost:3001** — done.
 
 ```
 npm run init --help        # see all flags
-npm run init --skip-docker # skip the Docker check (if you have a custom runtime)
 npm run init --skip-launch # write .env.local only, don't start next dev
 ```
 
 <details>
 <summary>Manual setup (advanced)</summary>
 
+Skip the wizard by editing `.env.local` directly:
+
 ```bash
-cp .env.example .env
+cp .env.example .env.local
 # Fill in the <<< SET ME >>> values:
 #   OPENAI_API_KEY     → https://platform.openai.com/api-keys
 #   ELEVENLABS_API_KEY → https://elevenlabs.io/app/settings/api-keys
-
-# Option A — run OpenRAG locally via Docker
-docker compose up -d --build   # ~30s warm cache, 4-5 min cold
-
-# Option B — run AI Workbench locally via Docker
-curl -O https://raw.githubusercontent.com/datastax/ai-workbench/main/docker-compose.yml
-docker compose up -d
+#   OPENRAG_URL        → URL of your running OpenRAG instance (default: http://localhost:3000)
 
 npm run dev    # Next.js on :3001
 ```
 
-The first time you load the app it shows a "Waiting for OpenRAG backend…"
+Make sure your backend is already running before starting the app.
+The first time you load the app it shows a "Waiting for backend…"
 panel — that's [HealthGate](src/components/HealthGate.tsx) polling
-[`/api/health`](src/app/api/health/route.ts) until OpenSearch comes up.
-Once it does, click "Run one-time setup" to install the default LLM
-(`gpt-4o-mini`) and embedding model (`text-embedding-3-small`) into OpenRAG
-via [`/api/setup`](src/app/api/setup/route.ts).
+[`/api/health`](src/app/api/health/route.ts) until the backend is ready.
 
 </details>
 

@@ -341,7 +341,13 @@ export default function NotebookPage({
               title={notebook.title}
               // Workbench KB names are immutable after creation — the Astra
               // collection name is set at KB creation time and cannot be changed.
-              readonly={notebook.rag_backend === "workbench"}
+              // Also lock title editing when offline — the PATCH would fail anyway.
+              readonly={notebook.rag_backend === "workbench" || offline}
+              readonlyReason={
+                offline
+                  ? "Backend is offline — title editing unavailable"
+                  : "AI Workbench Knowledge Base names cannot be changed after creation"
+              }
               onSave={async (newTitle) => {
                 const res = await fetch(`/api/notebooks/${id}`, {
                   method: "PATCH",
@@ -2649,13 +2655,14 @@ function StatusPill({ status }: { status: PodcastStatus | null }) {
 function InlineTitle({
   title,
   readonly = false,
+  readonlyReason,
   onSave,
 }: {
   title: string;
-  /** When true, the title is display-only — clicking it shows a tooltip
-   *  instead of opening an edit field. Used for Workbench notebooks whose
-   *  KB name is immutable after creation. */
+  /** When true, the title is display-only — clicking it shows a tooltip. */
   readonly?: boolean;
+  /** Tooltip shown when readonly. Defaults to the Workbench immutability message. */
+  readonlyReason?: string;
   onSave: (newTitle: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
@@ -2693,7 +2700,7 @@ function InlineTitle({
   if (readonly) {
     return (
       <span
-        title="AI Workbench Knowledge Base names cannot be changed after creation"
+        title={readonlyReason ?? "AI Workbench Knowledge Base names cannot be changed after creation"}
         className="px-1 text-base font-medium cursor-default"
       >
         {title}

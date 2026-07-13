@@ -44,6 +44,7 @@ import Spinner from "@/components/Spinner";
 // would throw and silently swallow the content panel.
 const MindMapRenderer = dynamic(() => import("@/components/MindMapRenderer"), { ssr: false });
 import { useOpenRAGSettings } from "@/components/OpenRAGContext";
+import { useBackendHealth } from "@/hooks/useBackendHealth";
 import ModelPickerPopover, { type PickerSaveResult } from "@/components/ModelPickerPopover";
 import FilterPickerPopover from "@/components/FilterPickerPopover";
 import SourceCitation from "@/components/SourceCitation";
@@ -77,6 +78,7 @@ export default function NotebookPage({
   // Next 15+ delivers `params` as a Promise; React's `use()` unwraps it.
   const { id } = use(params);
   const { settings: openragSettings, setSettings: setOpenragSettings } = useOpenRAGSettings();
+  const health = useBackendHealth();
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -313,6 +315,10 @@ export default function NotebookPage({
     return <div className="p-8 text-sm text-muted">Loading…</div>;
   }
 
+  // True when the notebook's specific backend is confirmed offline.
+  // "unknown" = first poll not yet back — don't disable on first paint.
+  const offline = health[notebook.rag_backend] === "down";
+
   return (
     <>
     <div className="flex h-screen w-screen overflow-hidden flex-col">
@@ -349,6 +355,13 @@ export default function NotebookPage({
               }}
             />
           </div>
+          {/* Offline pill — shown in the header so it's unmissable regardless
+              of which panel the user is looking at. */}
+          {offline && (
+            <span className="rounded-full border border-amber-600/50 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-400">
+              Offline — read only
+            </span>
+          )}
           {notebook.openrag_filter_name && (
             <FilterPickerPopover
               notebookId={notebook.id}
@@ -451,6 +464,7 @@ export default function NotebookPage({
           notebookId={id}
           documents={documents}
           onUploaded={refresh}
+          offline={offline}
           ragBackend={notebook.rag_backend}
           embeddingModel={
             notebook.rag_backend === "workbench"
@@ -525,6 +539,7 @@ export default function NotebookPage({
           }
           pendingSend={pendingAsk}
           onPendingSendConsumed={() => setPendingAsk(null)}
+          offline={offline}
         />
         <StudioPanel
           notebookId={id}
@@ -533,6 +548,7 @@ export default function NotebookPage({
           onNodeClick={handleNodeClick}
           onCreated={refresh}
           onDeleted={refresh}
+          offline={offline}
           onExpandChange={setStudioExpanded}
           collapsed={studioCollapsed}
           onToggle={() => setStudioCollapsed((v) => !v)}
@@ -636,6 +652,7 @@ function SourcesPanel({
   notebookId,
   documents,
   onUploaded,
+  offline,
   ragBackend,
   embeddingModel,
   embeddingLabel,
@@ -649,6 +666,7 @@ function SourcesPanel({
   notebookId: string;
   documents: Document[];
   onUploaded: () => void;
+  offline: boolean;
   ragBackend: "openrag" | "workbench";
   embeddingModel: string | null;
   embeddingLabel?: string;
@@ -1005,7 +1023,7 @@ function SourcesPanel({
             {/* Left half — opens the multi-file picker (unchanged behaviour) */}
             <button
               onClick={() => inputRef.current?.click()}
-              disabled={!!uploading}
+              disabled={offline || !!uploading}
               className="flex flex-1 items-center justify-center gap-2 rounded-l-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
               {uploading && <Spinner size="sm" />}
@@ -1020,7 +1038,7 @@ function SourcesPanel({
             {/* Right half — opens the folder-picker dropdown */}
             <button
               onClick={() => setFolderMenuOpen((v) => !v)}
-              disabled={!!uploading}
+              disabled={offline || !!uploading}
               title="Add a folder"
               className="flex items-center rounded-r-md bg-accent px-2 py-2 text-sm text-white disabled:opacity-50 hover:bg-accent/80"
             >
@@ -1049,7 +1067,7 @@ function SourcesPanel({
               // Focus the URL input on next paint after it mounts.
               if (!addingUrl) setTimeout(() => urlInputRef.current?.focus(), 0);
             }}
-            disabled={!!uploading}
+            disabled={offline || !!uploading}
             title="Add source from URL"
             className={`flex items-center rounded-md border px-3 py-2 text-sm font-medium transition disabled:opacity-50 ${
               addingUrl
@@ -1140,7 +1158,7 @@ function SourcesPanel({
                           ✕ Failed
                         </span>
                         <button
-                          disabled={!!uploading}
+                          disabled={offline || !!uploading}
                           onClick={() => {
                             const ext = "." + d.filename.split(".").pop()?.toLowerCase();
                             if (retryInputRef.current) {
@@ -1188,7 +1206,7 @@ function SourcesPanel({
             </button>
             <button
               onClick={bulkDelete}
-              disabled={deleting}
+              disabled={offline || deleting}
               className="ml-auto flex items-center gap-1.5 rounded-md bg-red-900/60 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-900 disabled:opacity-50"
             >
               {deleting && <Spinner size="xs" />}
@@ -1654,6 +1672,7 @@ function ChatPanel({
   selectedFilenames,
   pendingSend,
   onPendingSendConsumed,
+  offline,
 }: {
   notebookId: string;
   messages: Message[];
@@ -1669,6 +1688,7 @@ function ChatPanel({
   /** A question from a mind map node click waiting to be sent. Cleared by onPendingSendConsumed. */
   pendingSend: string | null;
   onPendingSendConsumed: () => void;
+  offline: boolean;
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -1888,7 +1908,7 @@ function ChatPanel({
         </select>
         <button
           onClick={newConversation}
-          disabled={creatingConv}
+          disabled={offline || creatingConv}
           title="New conversation"
           className="flex items-center gap-1 rounded px-2 py-1 text-xs text-muted hover:bg-edge hover:text-white disabled:opacity-50"
         >
@@ -1897,8 +1917,9 @@ function ChatPanel({
         </button>
         <button
           onClick={deleteConversation}
+          disabled={offline}
           title="Delete this conversation"
-          className="rounded px-2 py-1 text-xs text-muted hover:bg-red-950/40 hover:text-red-300"
+          className="rounded px-2 py-1 text-xs text-muted hover:bg-red-950/40 hover:text-red-300 disabled:opacity-50"
         >
           Delete
         </button>
@@ -1964,6 +1985,11 @@ function ChatPanel({
         )}
       </div>
       <form onSubmit={send} className="border-t border-edge bg-panel p-4">
+        {offline && (
+          <p className="mb-2 rounded border border-amber-900/50 bg-amber-950/30 p-2 text-xs text-amber-300">
+            Backend offline — chat unavailable
+          </p>
+        )}
         {error && (
           <p className="mb-2 rounded border border-red-900/50 bg-red-950/30 p-2 text-xs text-red-300">
             {error}
@@ -1974,11 +2000,11 @@ function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Ask anything about your sources…"
-            disabled={sending}
+            disabled={offline || sending}
             className="flex-1 rounded-lg border border-edge bg-ink px-3 py-2 text-sm outline-none focus:border-accent disabled:opacity-50"
           />
           <button
-            disabled={sending || !input.trim() || !activeConvId}
+            disabled={offline || sending || !input.trim() || !activeConvId}
             className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
             {sending && <Spinner size="sm" />}
@@ -2022,6 +2048,7 @@ function StudioPanel({
   onNodeClick,
   onCreated,
   onDeleted,
+  offline,
   onExpandChange,
   collapsed,
   onToggle,
@@ -2035,6 +2062,7 @@ function StudioPanel({
   onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
   onCreated: () => void;
   onDeleted: () => void;
+  offline: boolean;
   onExpandChange: (expanded: boolean) => void;
   collapsed: boolean;
   onToggle: () => void;
@@ -2226,7 +2254,7 @@ function StudioPanel({
     ) : (
       <div className="flex-1 overflow-y-auto px-4 py-4 text-sm">
         {expandedNote.type === "podcast" ? (
-          <PodcastCard note={expandedNote} onDelete={() => deleteNote(expandedNote.id)} />
+          <PodcastCard note={expandedNote} onDelete={offline ? undefined : () => deleteNote(expandedNote.id)} />
         ) : expandedNote.content ? (
           expandedNote.type === "outline" ? (
             <OutlineRenderer content={expandedNote.content} topic={expandedNote.topic} />
@@ -2248,7 +2276,8 @@ function StudioPanel({
         <span className="text-xs text-muted">{meta?.icon} {meta?.label}</span>
         <button
           onClick={() => deleteNote(expandedNote.id)}
-          className="text-xs text-muted hover:text-red-300"
+          disabled={offline}
+          className="text-xs text-muted hover:text-red-300 disabled:opacity-40 disabled:pointer-events-none"
         >
           Delete note
         </button>
@@ -2297,10 +2326,12 @@ function StudioPanel({
             return (
               <button
                 key={type}
-                onClick={() => setActiveType(active ? null : type)}
+                onClick={() => !offline && setActiveType(active ? null : type)}
+                disabled={offline}
                 className={`flex items-center justify-between rounded-lg border p-2.5 text-left transition
                   ${active ? activeColor : color}
-                  ${active ? "text-white" : "text-zinc-300"}`}
+                  ${active ? "text-white" : "text-zinc-300"}
+                  ${offline ? "pointer-events-none opacity-40" : ""}`}
               >
                 <div className="flex flex-col gap-1">
                   <span className="text-base leading-none">{icon}</span>
@@ -2322,11 +2353,13 @@ function StudioPanel({
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
               placeholder="Optional topic / focus"
-              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent"
+              disabled={offline}
+              className="mt-2 w-full rounded-md border border-edge bg-ink px-2 py-1.5 text-sm outline-none focus:border-accent disabled:opacity-50"
             />
             <button
               onClick={generate}
-              className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white"
+              disabled={offline}
+              className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
               Generate
             </button>
@@ -2360,14 +2393,14 @@ function StudioPanel({
         <div className="mt-5 space-y-3">
           {notes.map((note) =>
             note.type === "podcast" ? (
-              <PodcastCard key={note.id} note={note} onDelete={() => deleteNote(note.id)} />
+              <PodcastCard key={note.id} note={note} onDelete={offline ? undefined : () => deleteNote(note.id)} />
             ) : (
               <NoteCard
                 key={note.id}
                 note={note}
                 mindMapLinks={mindMapLinks}
                 onNodeClick={onNodeClick}
-                onDelete={() => deleteNote(note.id)}
+                onDelete={offline ? undefined : () => deleteNote(note.id)}
                 onExpand={() => setExpandedId(note.id)}
               />
             )
@@ -2388,7 +2421,8 @@ function StudioPanel({
 // status pill), ready (audio player), failed (error text). The script toggle
 // is independent — available as soon as scripting finishes.
 // ============================================================================
-function PodcastCard({ note, onDelete }: { note: Note; onDelete: () => void }) {
+// onDelete is optional — omit it to disable the delete button (e.g. when offline).
+function PodcastCard({ note, onDelete }: { note: Note; onDelete?: () => void }) {
   const [showScript, setShowScript] = useState(false);
   const icon = NOTE_TYPES.find((t) => t.type === "podcast")!.icon;
   return (
@@ -2399,7 +2433,8 @@ function PodcastCard({ note, onDelete }: { note: Note; onDelete: () => void }) {
         <StatusPill status={note.status} />
         <button
           onClick={onDelete}
-          className="ml-1 text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
+          disabled={!onDelete}
+          className="ml-1 text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-0"
         >
           ✕
         </button>
@@ -2443,7 +2478,8 @@ function NoteCard({
   note: Note;
   mindMapLinks: MindMapLink[];
   onNodeClick: (nodeLabel: string, linkedConvIds: string[], noteId: string, noteTopic: string | null, ancestorLabels: string[]) => void;
-  onDelete: () => void;
+  // onDelete is optional — omit it to disable the delete button (e.g. when offline).
+  onDelete?: () => void;
   onExpand: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -2517,8 +2553,9 @@ function NoteCard({
             ⛶
           </button>
           <button
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100"
+            onClick={(e) => { e.stopPropagation(); onDelete?.(); }}
+            disabled={!onDelete}
+            className="text-xs text-muted opacity-0 hover:text-red-300 group-hover:opacity-100 disabled:pointer-events-none disabled:opacity-0"
             title="Delete note"
           >
             ✕

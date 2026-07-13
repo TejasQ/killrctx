@@ -152,8 +152,15 @@ export default function Home() {
               >
                 <div className="flex items-center gap-2.5">
                   <BackendLogo backend={nb.rag_backend} health={health} />
-                  <div>
-                    <div className="text-sm font-medium">{nb.title}</div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{nb.title}</span>
+                      {health[(nb.rag_backend ?? "openrag") as "openrag" | "workbench"] === "down" && (
+                        <span className="rounded-full border border-amber-600/50 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-400">
+                          Read only
+                        </span>
+                      )}
+                    </div>
                     <div className="text-xs text-muted">
                       {new Date(nb.created_at).toLocaleString()}
                     </div>

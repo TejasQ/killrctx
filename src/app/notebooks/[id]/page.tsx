@@ -361,11 +361,15 @@ export default function NotebookPage({
               }}
             />
           </div>
-          {/* Offline pill — shown in the header so it's unmissable regardless
-              of which panel the user is looking at. */}
-          {offline && (
+          {/* Status pill — always shown so the connection state is explicit.
+              Amber = offline/read-only. Green = backend is reachable. */}
+          {offline ? (
             <span className="rounded-full border border-amber-600/50 bg-amber-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-amber-400">
               Offline — read only
+            </span>
+          ) : health[notebook.rag_backend] === "up" && (
+            <span className="rounded-full border border-green-600/50 bg-green-950/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-green-400">
+              Online
             </span>
           )}
           {notebook.openrag_filter_name && (

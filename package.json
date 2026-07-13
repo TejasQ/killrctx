@@ -5,6 +5,11 @@
   "scripts": {
     "init": "node scripts/setup.mjs",
     "setup": "node scripts/setup.mjs",
+    "init:status": "node scripts/setup.mjs --status",
+    "init:openrag": "node scripts/setup.mjs --configure openrag",
+    "init:workbench": "node scripts/setup.mjs --configure workbench",
+    "init:all": "node scripts/setup.mjs --configure all",
+    "init:launch": "node scripts/setup.mjs --launch",
     "sync:onboard": "cp scripts/setup.mjs ../killrctx-onboard/scripts/setup.mjs && cp .env.example ../killrctx-onboard/.env.example",
     "dev": "next dev -p 3001",
     "build": "next build",

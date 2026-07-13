@@ -21,6 +21,17 @@
 - [x] TASK-17: [docs] Update README quick start — start backend → run wizard → open app flow; remove `--skip-docker` from flags docs
 - [x] TASK-18: [specs] Update spec files to reflect detect-and-connect direction
 
+## Control-panel rewrite
+
+- [x] TASK-19: [scripts] Add `init:status`, `init:openrag`, `init:workbench`, `init:all`, `init:launch` aliases to `package.json#scripts`
+- [x] TASK-20: [scripts] Replace `--skip-launch` with full flag set: `--status`, `--configure <openrag|workbench|all>`, `--launch`, `--force`, `--skip-launch` via cac
+- [x] TASK-21: [scripts] Implement persistent numbered menu loop `[1]–[6]`; menu reprints after each action
+- [x] TASK-22: [scripts] Add "Already configured — reconfigure? No / Yes" prompt to configure flow; `--force` bypasses it
+- [x] TASK-23: [scripts] Add offline warning before key prompts when backend is DOWN; skip Workbench ID discovery when DOWN
+- [x] TASK-24: [scripts] Make writes per-backend and incremental; backup `.env.local` once per session only
+- [x] TASK-25: [scripts] Drop dead `injectEnvValue()` function
+- [x] TASK-26: [housekeeping] Add `.env.local.bak` to `.gitignore`
+
 ## Done criteria per task
 
 - **TASK-01/02**: `package.json` devDependencies includes cac@^6, chalk@^5, ora@^8, prompts@^2; `node_modules` updated

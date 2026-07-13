@@ -8,16 +8,25 @@
 //
 // This script does NOT install anything. Start a backend first, then run it.
 //
-// Flow:
+// Flow (interactive / no flags):
 //   1. printBanner()           — show the title
 //   2. detectBackends()        — probe OpenRAG + AI Workbench (3s timeout each)
-//   3. promptBackendChoice()   — pick from running backends; exit 0 if none
-//   4. collectKeys(choice)     — gather API keys for the chosen backend
-//   5. discoverWorkbenchConfig — (Workbench only) query live API for UUIDs
-//   6. writeEnvLocal()         — merge into .env.local (backs up existing)
-//   7. launchApp()             — npm run dev (unless --skip-launch)
+//   3. showMenu()              — arrow-key select with [1]–[6] labels; reprints after each action
 //
-// Flags (via cac): --skip-launch  --help  --version
+// Non-interactive flags (via cac — each maps to one menu action):
+//   --status               print detection results and exit
+//   --configure openrag    configure OpenRAG and write .env.local
+//   --configure workbench  configure AI Workbench and write .env.local
+//   --configure all        configure both backends
+//   --launch               run configure-all then start the app
+//   --force                skip "already configured?" guard in configure flow
+//   --skip-launch          legacy alias for running configure without launching
+//   --help / --version
+//
+// Per-backend configure flow:
+//   a. collectKeys(backend)           — gather API keys (warns if backend DOWN)
+//   b. discoverWorkbenchConfig()      — (Workbench only) pick workspace/agent IDs
+//   c. writeEnvLocal(backends, keys)  — incremental write; backup once per session
 // ============================================================================
 
 import { createRequire } from 'module'
@@ -41,6 +50,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT      = path.resolve(__dirname, '..')          // killrctx repo root
 const PKG       = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
 
+// Tracks whether we've already backed up .env.local this session so we only
+// do it once — subsequent incremental writes should not overwrite the backup.
+let backupDoneThisSession = false
+
 // ─── tiny log helpers ────────────────────────────────────────────────────────
 const sym = {
   ok:   chalk.green('✓'),
@@ -62,7 +75,11 @@ const log = {
 const cli = cac('killrctx')
 cli.version(PKG.version)
 cli.help()
-cli.option('--skip-launch', 'Write .env.local but do not start the app')
+cli.option('--status',           'Show backend detection results and exit')
+cli.option('--configure <target>', 'Configure openrag | workbench | all')
+cli.option('--launch',           'Configure all backends then start the app')
+cli.option('--force',            'Skip "already configured?" guard')
+cli.option('--skip-launch',      'Write .env.local but do not start the app (legacy)')
 cli.command('[...args]', 'Interactive setup wizard').action((_args, opts) => {
   main(opts).catch((err) => {
     log.fail(err.message ?? String(err))
@@ -75,33 +92,142 @@ cli.parse()
 async function main(opts = {}) {
   printBanner()
 
-  // 1. Probe what's running — if nothing is found we print instructions and stop.
   const backends = await detectBackends()
 
-  // 2. Ask which backend to use. This prints start instructions and exits if
-  //    nothing is running, so the return value is always a live backend choice.
-  const choice = await promptBackendChoice(backends)
+  // Non-interactive flag paths — each does one thing and exits.
+  if (opts.status) {
+    // detectBackends already printed the status table — nothing more needed.
+    process.exit(0)
+  }
 
-  // 3. Collect API keys and connection details for the chosen backend.
-  const keys = await collectKeys(choice.key)
+  if (opts.configure) {
+    const target = String(opts.configure).toLowerCase()
+    if (target === 'openrag' || target === 'all') {
+      await configureBackend('openrag', backends, opts)
+    }
+    if (target === 'workbench' || target === 'all') {
+      await configureBackend('workbench', backends, opts)
+    }
+    process.exit(0)
+  }
 
-  // 4. For Workbench, query the live API to auto-discover workspace/agent/service
-  //    IDs so the user never has to paste UUIDs into .env.local.
-  if (choice.key === 'workbench') {
+  if (opts.launch) {
+    await configureBackend('openrag',   backends, opts)
+    await configureBackend('workbench', backends, opts)
+    await launchApp()
+    return
+  }
+
+  // Legacy --skip-launch: configure everything, skip launch.
+  if (opts['skip-launch']) {
+    await configureBackend('openrag',   backends, opts)
+    await configureBackend('workbench', backends, opts)
+    log.nl()
+    log.ok('.env.local written. Skipping launch (--skip-launch).')
+    process.exit(0)
+  }
+
+  // No flags — show the interactive menu loop.
+  await showMenu(backends, opts)
+}
+
+// ─── showMenu ─────────────────────────────────────────────────────────────────
+// _Basically_, a numbered menu that stays on screen until the user exits.
+// Each action completes then the menu reprints — so the developer can configure
+// one backend, check status, and launch without re-running the script.
+async function showMenu(backends, opts) {
+  while (true) {
+    const { choice } = await prompts({
+      type:    'select',
+      name:    'choice',
+      message: 'What would you like to do?',
+      choices: [
+        { title: '[1]  Configure OpenRAG',      value: '1' },
+        { title: '[2]  Configure AI Workbench', value: '2' },
+        { title: '[3]  Configure both',         value: '3' },
+        { title: '[4]  Show backend status',    value: '4' },
+        { title: '[5]  Launch app',             value: '5' },
+        { title: '[6]  Exit',                   value: '6' },
+      ],
+    })
+
+    log.nl()
+
+    if (choice === '1') await configureBackend('openrag',   backends, opts)
+    if (choice === '2') await configureBackend('workbench', backends, opts)
+    if (choice === '3') {
+      await configureBackend('openrag',   backends, opts)
+      await configureBackend('workbench', backends, opts)
+    }
+    if (choice === '4') await detectBackends()    // re-probe and reprint status
+    if (choice === '5') { await launchApp(); return }
+    if (choice === '6' || !choice) process.exit(0)
+  }
+}
+
+// ─── configureBackend ─────────────────────────────────────────────────────────
+// _Basically_, the per-backend configure flow: check if already configured,
+// collect keys, discover Workbench IDs (if applicable), write .env.local.
+//
+// Skips with a "already configured" prompt unless --force is set.
+// Warns if the backend is currently DOWN (keys may not work, but proceeds).
+async function configureBackend(backendKey, backends, opts = {}) {
+  const label = backendKey === 'openrag' ? 'OpenRAG' : 'AI Workbench'
+
+  // ── Already-configured guard (TASK-22) ───────────────────────────────────
+  if (!opts.force) {
+    const alreadySet = isBackendConfigured(backendKey)
+    if (alreadySet) {
+      const { proceed } = await prompts({
+        type:    'confirm',
+        name:    'proceed',
+        message: `${label} is already configured — reconfigure?`,
+        initial: false,
+      })
+      if (!proceed) {
+        log.info(`Keeping existing ${label} configuration.`)
+        log.nl()
+        return
+      }
+    }
+  }
+
+  // ── Offline warning (TASK-23) ─────────────────────────────────────────────
+  const isUp = backendKey === 'openrag' ? backends.openrag : backends.workbench
+  if (!isUp) {
+    log.warn(`${label} is not running. Keys entered now may not work until the backend starts.`)
+    log.nl()
+  }
+
+  // ── Collect keys ──────────────────────────────────────────────────────────
+  const keys = await collectKeys(backendKey)
+
+  // ── Workbench: discover workspace/agent/service IDs ───────────────────────
+  // We skip discovery when the backend is DOWN — there's nothing to query.
+  if (backendKey === 'workbench' && isUp) {
     const discovered = await discoverWorkbenchConfig(backends.workbenchUrl)
     Object.assign(keys, discovered)
   }
 
-  // 5. Write .env.local with the connection URLs + keys + discovered IDs.
+  // ── Write .env.local (incremental) ────────────────────────────────────────
   await writeEnvLocal(backends, keys)
+}
 
-  // 6. Launch (unless skipped).
-  if (!opts['skip-launch']) {
-    await launchApp()
-  } else {
-    log.nl()
-    log.ok('.env.local written. Skipping launch (--skip-launch).')
+// ─── isBackendConfigured ──────────────────────────────────────────────────────
+// Returns true if the key variables for this backend are already set in
+// .env.local or .env (i.e. a previous wizard run wrote them).
+function isBackendConfigured(backendKey) {
+  const env = {
+    ...loadEnvFile(path.join(ROOT, '.env')),
+    ...loadEnvFile(path.join(ROOT, '.env.local')),
   }
+  if (backendKey === 'openrag') {
+    return Boolean(env.OPENAI_API_KEY || env.OPENRAG_API_KEY)
+  }
+  if (backendKey === 'workbench') {
+    return Boolean(env.WORKBENCH_URL && env.WORKBENCH_WORKSPACE_ID)
+  }
+  return false
 }
 
 // ─── printBanner ─────────────────────────────────────────────────────────────
@@ -128,7 +254,11 @@ function loadEnvFile(filePath) {
     // Strip inline comments — e.g. KEY=value  # comment
     const raw = trimmed.slice(eq + 1)
     const val = raw.replace(/#.*$/, '').trim()
-    vars[key] = val
+    // Only record non-blank values. A blank entry (e.g. OPENAI_API_KEY= from
+    // .env.example / a fresh .env.local) should not shadow a real value in
+    // a higher-priority file — we skip it here and let the merge in callers
+    // fall through to the next file in priority order.
+    if (val) vars[key] = val
   }
   return vars
 }
@@ -183,48 +313,6 @@ async function detectBackends() {
   log.nl()
 
   return { openrag, workbench, openragUrl, workbenchUrl }
-}
-
-// ─── promptBackendChoice ─────────────────────────────────────────────────────
-// _Basically_, shows only the backends that are currently running. If nothing
-// is running we print per-platform start instructions and exit — the user needs
-// to start a backend before this wizard can do anything useful.
-// Returns { key: 'openrag'|'workbench'|'skip' }
-async function promptBackendChoice(backends) {
-  const running = []
-  if (backends.openrag)   running.push({ title: `${chalk.bold('OpenRAG')}       ${chalk.dim(backends.openragUrl)}`,   value: 'openrag' })
-  if (backends.workbench) running.push({ title: `${chalk.bold('AI Workbench')}  ${chalk.dim(backends.workbenchUrl)}`, value: 'workbench' })
-  running.push({ title: chalk.dim('Skip for now'), value: 'skip' })
-
-  // Nothing running — print instructions so the developer knows exactly what to do.
-  if (!backends.openrag && !backends.workbench) {
-    log.info('No backend is running. Start one first, then re-run npm run init.')
-    log.nl()
-    console.log(`  ${chalk.bold('OpenRAG')} (recommended):`)
-    console.log(`    https://github.com/langflow-ai/openrag — follow Quick Start`)
-    console.log(`    Default URL: ${chalk.cyan('http://localhost:3000')}`)
-    log.nl()
-    console.log(`  ${chalk.bold('AI Workbench')}:`)
-    console.log(`    https://github.com/datastax/ai-workbench — follow Quick Start`)
-    console.log(`    Default URL: ${chalk.cyan('http://localhost:8080')}`)
-    log.nl()
-    process.exit(0)
-  }
-
-  const { choice } = await prompts({
-    type:    'select',
-    name:    'choice',
-    message: 'Which backend would you like to use?',
-    choices: running,
-  })
-
-  if (!choice || choice === 'skip') {
-    log.warn('Skipping backend selection. Some features will be unavailable.')
-    log.nl()
-    return { key: 'skip' }
-  }
-
-  return { key: choice }
 }
 
 // ─── collectKeys ─────────────────────────────────────────────────────────────
@@ -384,7 +472,10 @@ async function discoverWorkbenchConfig(baseUrl) {
 // Reads .env.example as the base, writes .env.local with connection URLs and
 // discovered IDs, collected API keys, and any non-blank values already in
 // .env.local/.env (so re-running init never loses keys the user set previously).
-// Backs up any pre-existing .env.local first.
+//
+// Backs up any pre-existing .env.local — but only once per session (the first
+// time this function runs). Subsequent calls in the same session do incremental
+// writes without overwriting the backup.
 async function writeEnvLocal(backends, keys) {
   const examplePath = path.join(ROOT, '.env.example')
   const localPath   = path.join(ROOT, '.env.local')
@@ -403,9 +494,10 @@ async function writeEnvLocal(backends, keys) {
     ...loadEnvFile(localPath),
   }
 
-  // Back up existing .env.local
-  if (fs.existsSync(localPath)) {
-    fs.renameSync(localPath, backupPath)
+  // Back up existing .env.local — only once per session (TASK-24).
+  if (!backupDoneThisSession && fs.existsSync(localPath)) {
+    fs.copyFileSync(localPath, backupPath)
+    backupDoneThisSession = true
     log.info(`.env.local.bak created from previous .env.local`)
   }
 
@@ -498,22 +590,4 @@ function portPid(port) {
   } catch {
     return null  // lsof exits non-zero when nothing is listening
   }
-}
-
-// Replace (or append) a KEY=value line in an env file.
-// Used by tests and external scripts that patch .env.local directly.
-function injectEnvValue(filePath, key, value) {
-  const content = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : ''
-  const lines   = content.split('\n')
-  let found     = false
-  const updated = lines.map((line) => {
-    const eq = line.indexOf('=')
-    if (eq !== -1 && line.slice(0, eq).trim() === key) {
-      found = true
-      return `${key}=${value}`
-    }
-    return line
-  })
-  if (!found) updated.push(`${key}=${value}`)
-  fs.writeFileSync(filePath, updated.join('\n'), 'utf8')
 }

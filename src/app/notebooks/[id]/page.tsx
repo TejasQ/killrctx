@@ -385,7 +385,8 @@ export default function NotebookPage({
           )}
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
-          {notebook.rag_backend === "workbench" ? (
+          {/* Model picker — hidden when offline: no command can be issued anyway. */}
+          {!offline && (notebook.rag_backend === "workbench" ? (
             // Workbench: show the agent name bound to the active conversation.
             (() => {
               const activeConv = conversations.find((c) => c.id === activeConvId);
@@ -454,7 +455,7 @@ export default function NotebookPage({
                 </span>
               </ModelPickerPopover>
             )
-          )}
+          ))}
           {notebook.rag_backend !== "workbench" && (
             <span>collection: {notebook.openrag_collection}</span>
           )}
@@ -923,8 +924,8 @@ function SourcesPanel({
           ‹
         </button>
       </div>
-      {/* Row 2: embedding model picker (workbench always; openrag when set) */}
-      {(ragBackend === "workbench" || embeddingModel) && (
+      {/* Row 2: embedding model picker — hidden when offline, no change can be issued. */}
+      {!offline && (ragBackend === "workbench" || embeddingModel) && (
         <div className="flex items-center border-b border-edge px-4 py-2">
           {embeddingModel ? (
             <ModelPickerPopover
@@ -1137,14 +1138,17 @@ function SourcesPanel({
               >
                 {/* Checkbox — always in the DOM; fades in on hover or when any
                     box is already checked so layout never shifts. Styled to
-                    match the dark palette rather than the system native look. */}
+                    match the dark palette rather than the system native look.
+                    Hidden entirely when offline — doc selection only matters for
+                    scoping chat queries, which can't be sent anyway. */}
                 <input
                   type="checkbox"
                   checked={selected.has(d.id)}
                   onChange={() => toggleSelect(d.id)}
+                  disabled={offline}
                   className={`h-3.5 w-3.5 flex-shrink-0 cursor-pointer appearance-none rounded-sm border border-edge bg-edge transition
                     checked:border-accent checked:bg-accent
-                    ${selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                    ${offline ? "pointer-events-none opacity-0" : selected.size > 0 ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
                 />
                 <DocIcon className="h-3.5 w-3.5 flex-shrink-0 text-muted" />
                 <div className="min-w-0 flex-1">

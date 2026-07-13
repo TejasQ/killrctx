@@ -385,8 +385,8 @@ export default function NotebookPage({
           )}
         </div>
         <div className="flex items-center gap-4 text-xs text-muted">
-          {/* Model picker — hidden when offline: no command can be issued anyway. */}
-          {!offline && (notebook.rag_backend === "workbench" ? (
+          {/* Model picker — disabled when offline: no command can be issued anyway. */}
+          {(notebook.rag_backend === "workbench" ? (
             // Workbench: show the agent name bound to the active conversation.
             (() => {
               const activeConv = conversations.find((c) => c.id === activeConvId);
@@ -415,8 +415,9 @@ export default function NotebookPage({
                   backend="workbench"
                   notebookId={id}
                   convId={activeConvId ?? undefined}
+                  disabled={offline}
                 >
-                  <span title="Click to change agent">
+                  <span title={offline ? "Backend offline" : "Click to change agent"} className={offline ? "pointer-events-none opacity-50" : ""}>
                     model:{" "}
                     <span
                       className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
@@ -440,8 +441,9 @@ export default function NotebookPage({
                   if (result.backend === "openrag") setOpenragSettings(result.settings);
                 }}
                 align="right"
+                disabled={offline}
               >
-                <span title="Click to change model">
+                <span title={offline ? "Backend offline" : "Click to change model"} className={offline ? "pointer-events-none opacity-50" : ""}>
                   model:{" "}
                   <span
                     className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"
@@ -924,8 +926,8 @@ function SourcesPanel({
           ‹
         </button>
       </div>
-      {/* Row 2: embedding model picker — hidden when offline, no change can be issued. */}
-      {!offline && (ragBackend === "workbench" || embeddingModel) && (
+      {/* Row 2: embedding model picker — disabled when offline, no change can be issued. */}
+      {(ragBackend === "workbench" || embeddingModel) && (
         <div className="flex items-center border-b border-edge px-4 py-2">
           {embeddingModel ? (
             <ModelPickerPopover
@@ -935,8 +937,9 @@ function SourcesPanel({
               onSaved={onEmbeddingModelSaved}
               backend={ragBackend}
               notebookId={notebookId}
+              disabled={offline}
             >
-              <span title="Click to change embedding model" className="text-xs text-muted">
+              <span title={offline ? "Backend offline" : "Click to change embedding model"} className={`text-xs text-muted${offline ? " pointer-events-none opacity-50" : ""}`}>
                 embed:{" "}
                 <span
                   className="animate-rainbow bg-[length:200%_auto] bg-clip-text font-medium text-transparent"

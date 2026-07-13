@@ -231,28 +231,51 @@ async function promptBackendChoice(backends) {
 // _Basically_, prompts only for the keys killrctx itself needs to talk to the
 // chosen backend — not for the keys the backend uses internally (those were
 // configured when the user set up the backend).
+//
+// If a key already exists in .env or .env.local its masked value is shown next
+// to the prompt and pressing Enter keeps it (no re-typing required).
 async function collectKeys(backendKey) {
   log.rule()
   log.info('API keys for killrctx:')
   log.rule()
   log.nl()
 
+  // Read existing values so we can pre-fill prompts (.env.local wins over .env).
+  const existing = {
+    ...loadEnvFile(path.join(ROOT, '.env')),
+    ...loadEnvFile(path.join(ROOT, '.env.local')),
+  }
+
+  // Returns a masked hint like "sk-…xYz" for display next to the prompt.
+  // Plain text only — prompts wraps the message in kleur.bold() internally,
+  // and nested chalk ANSI codes inside that wrapper render incorrectly on
+  // most terminals (the dim codes get swallowed by the bold reset).
+  const mask = (v) => v ? `${v.slice(0, 3)}…${v.slice(-3)}` : ''
+
   const needed = []
   if (backendKey === 'openrag') {
-    needed.push({ name: 'OPENAI_API_KEY',  label: `OpenAI API key ${chalk.dim('(platform.openai.com/api-keys)')}` })
-    needed.push({ name: 'OPENRAG_API_KEY', label: `OpenRAG API key ${chalk.dim('(optional)')}` })
+    needed.push({ name: 'OPENAI_API_KEY',  label: 'OpenAI API key (platform.openai.com/api-keys)' })
+    needed.push({ name: 'OPENRAG_API_KEY', label: 'OpenRAG API key (optional)' })
   }
   // Workbench connection URL is already known from detectBackends — no key prompts.
-  needed.push({ name: 'ELEVENLABS_API_KEY', label: `ElevenLabs API key ${chalk.dim('(elevenlabs.io/app/settings/api-keys · optional)')}` })
+  needed.push({ name: 'ELEVENLABS_API_KEY', label: 'ElevenLabs API key (elevenlabs.io/app/settings/api-keys · optional)' })
 
   const result = {}
   for (const { name, label } of needed) {
+    const current = existing[name] || ''
+    // Plain-text hint — no chalk here so the mask is visible inside prompts'
+    // own bold wrapper. e.g.  OpenAI API key ... [sk-…VoA]:
+    const hint    = current ? ` [${mask(current)}]` : ''
+
     const { value } = await prompts({
       type:    'invisible',
       name:    'value',
-      message: `${label}:`,
+      message: `${label}${hint}`,
     })
-    if (value) result[name] = value
+
+    // Empty input = keep existing value (if any). Explicit input = use new value.
+    const resolved = value || current
+    if (resolved) result[name] = resolved
   }
 
   log.nl()
@@ -359,7 +382,8 @@ async function discoverWorkbenchConfig(baseUrl) {
 
 // ─── writeEnvLocal ───────────────────────────────────────────────────────────
 // Reads .env.example as the base, writes .env.local with connection URLs and
-// discovered IDs. For fresh installs, also writes the collected API keys.
+// discovered IDs, collected API keys, and any non-blank values already in
+// .env.local/.env (so re-running init never loses keys the user set previously).
 // Backs up any pre-existing .env.local first.
 async function writeEnvLocal(backends, keys) {
   const examplePath = path.join(ROOT, '.env.example')
@@ -371,15 +395,29 @@ async function writeEnvLocal(backends, keys) {
     return
   }
 
+  // Read existing env files BEFORE we rename .env.local so we can carry
+  // all non-blank values forward. .env.local wins over .env (same priority
+  // as Next.js itself uses at runtime).
+  const existingEnv = {
+    ...loadEnvFile(path.join(ROOT, '.env')),
+    ...loadEnvFile(localPath),
+  }
+
   // Back up existing .env.local
   if (fs.existsSync(localPath)) {
     fs.renameSync(localPath, backupPath)
     log.info(`.env.local.bak created from previous .env.local`)
   }
 
-  // Build the overrides map: connection URLs + discovered IDs + fresh-install keys.
-  // Existing installs only contribute URLs and IDs — keys stay in the platform.
+  // Build the overrides map, in priority order (highest last wins):
+  //   1. non-blank values already in .env / .env.local   — carry-forward
+  //   2. URLs detected this run                          — always authoritative
+  //   3. keys collected from the user this run           — explicit user input wins
+  const carryForward = Object.fromEntries(
+    Object.entries(existingEnv).filter(([, v]) => v)
+  )
   const overrides = {
+    ...carryForward,
     ...(backends.openrag   && { OPENRAG_URL:   backends.openragUrl }),
     ...(backends.workbench && { WORKBENCH_URL: backends.workbenchUrl }),
     ...Object.fromEntries(Object.entries(keys).filter(([, v]) => v)),

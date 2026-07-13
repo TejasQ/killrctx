@@ -43,29 +43,54 @@ algorithm.
 
 ## Quick start
 
-```bash
-cp .env.example .env
-# Fill in the four <<< SET ME >>> values:
-#   OPENAI_API_KEY              -> from https://platform.openai.com/api-keys
-#   ELEVENLABS_API_KEY          -> from https://elevenlabs.io/app/settings/api-keys
-#   OPENSEARCH_PASSWORD         -> any strong password (upper+lower+digit+special)
-#   plus the four secrets generated with `openssl rand -hex 32` and
-#   LANGFLOW_SECRET_KEY which is generated with the python one-liner in the file
+**Step 1 — start a backend** (pick one):
 
-docker compose up -d --build   # OpenRAG stack: ~30s on a warm cache, 4-5 min cold
+- **OpenRAG** — [quick start](https://github.com/langflow-ai/openrag) · default URL: `http://localhost:3000`
+- **AI Workbench** — [quick start](https://github.com/datastax/ai-workbench) · default URL: `http://localhost:8080`
+
+**Step 2 — run the wizard:**
+
+```bash
+git clone https://github.com/datastax/killrctx
+cd killrctx
 npm install
-npm run dev                    # Next.js on :3001
+npm run init
 ```
 
-Open http://localhost:3001. The first time you load it the UI shows a
-"Waiting for OpenRAG backend…" panel — that's [HealthGate](src/components/HealthGate.tsx)
-polling [/api/health](src/app/api/health/route.ts) until OpenSearch comes up.
-Once it does, you'll see a "Run one-time setup" button that installs the
-default LLM (`gpt-4o-mini`) and embedding model (`text-embedding-3-small`)
-into OpenRAG via [/api/setup](src/app/api/setup/route.ts).
+`npm run init` detects which backend is running, then:
 
-Then click "Create" → drop a PDF in → ask a question → click "Generate" in
-Studio.
+- **Detects** OpenRAG / AI Workbench running locally
+- **Collects your API keys** (OpenAI, ElevenLabs) with invisible input
+- **Writes `.env.local`** and starts the app
+
+**Step 3 —** open **http://localhost:3001** — done.
+
+```
+npm run init --help        # see all flags
+npm run init --skip-launch # write .env.local only, don't start next dev
+```
+
+<details>
+<summary>Manual setup (advanced)</summary>
+
+Skip the wizard by editing `.env.local` directly:
+
+```bash
+cp .env.example .env.local
+# Fill in the <<< SET ME >>> values:
+#   OPENAI_API_KEY     → https://platform.openai.com/api-keys
+#   ELEVENLABS_API_KEY → https://elevenlabs.io/app/settings/api-keys
+#   OPENRAG_URL        → URL of your running OpenRAG instance (default: http://localhost:3000)
+
+npm run dev    # Next.js on :3001
+```
+
+Make sure your backend is already running before starting the app.
+The first time you load the app it shows a "Waiting for backend…"
+panel — that's [HealthGate](src/components/HealthGate.tsx) polling
+[`/api/health`](src/app/api/health/route.ts) until the backend is ready.
+
+</details>
 
 ---
 

@@ -46,3 +46,4 @@ Thumbs.db
 # local claude code config
 .claude/
 CLAUDE.md
+.env.local.bak

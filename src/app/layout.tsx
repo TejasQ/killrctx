@@ -5,9 +5,9 @@
 // _Basically_, this is the outermost shell. It does three things:
 //   1. Loads global CSS (Tailwind base + our custom dark palette).
 //   2. Sets <head> metadata.
-//   3. Wraps `children` in <HealthGate> so no page renders until the
-//      OpenRAG backend reports ready. See components/HealthGate.tsx for the
-//      gate's three states (booting / needs setup / ready).
+//   3. Wraps `children` in <HealthGate>, which provides OpenRAGContext and
+//      shows an offline banner when a backend is unreachable. The app loads
+//      immediately — no blocking gate. See components/HealthGate.tsx.
 //
 // Single-language `<html lang="en">` — if you ever ship localized content,
 // flip this dynamically based on the request locale.
@@ -26,7 +26,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body>
-        {/* Every route in the app is gated behind OpenRAG readiness. */}
+        {/* Provides OpenRAGContext + offline banner. Non-blocking. */}
         <HealthGate>{children}</HealthGate>
       </body>
     </html>

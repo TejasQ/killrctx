@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "init": "node scripts/setup.mjs",
+    "setup": "node scripts/setup.mjs",
+    "init:status": "node scripts/setup.mjs --status",
+    "init:openrag": "node scripts/setup.mjs --configure openrag",
+    "init:workbench": "node scripts/setup.mjs --configure workbench",
+    "init:all": "node scripts/setup.mjs --configure all",
+    "init:launch": "node scripts/setup.mjs --launch",
+    "sync:onboard": "cp scripts/setup.mjs ../killrctx-onboard/scripts/setup.mjs && cp .env.example ../killrctx-onboard/.env.example",
     "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start -p 3001",
@@ -31,7 +39,11 @@
     "@types/react-dom": "19.0.3",
     "@types/uuid": "^10.0.0",
     "autoprefixer": "^10.4.20",
+    "cac": "^6.7.14",
+    "chalk": "^5.6.2",
+    "ora": "^8.2.0",
     "postcss": "^8.5.1",
+    "prompts": "^2.4.2",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3"
   }

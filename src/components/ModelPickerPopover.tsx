@@ -51,6 +51,7 @@ export default function ModelPickerPopover({
   backend = "openrag",
   notebookId,
   convId,
+  disabled = false,
   children,
 }: {
   kind: "llm" | "embedding";
@@ -63,6 +64,8 @@ export default function ModelPickerPopover({
   backend?: "openrag" | "workbench";
   notebookId?: string;
   convId?: string;
+  /** When true, the trigger button is disabled and the popover cannot be opened. */
+  disabled?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -185,7 +188,7 @@ export default function ModelPickerPopover({
       <button
         onClick={() => setOpen((v) => !v)}
         className="cursor-pointer appearance-none bg-transparent p-0 border-0"
-        disabled={saving}
+        disabled={saving || disabled}
         aria-expanded={open}
         aria-haspopup="listbox"
       >

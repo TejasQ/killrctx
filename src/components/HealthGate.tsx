@@ -33,6 +33,7 @@ export default function HealthGate({ children }: { children: ReactNode }) {
 
   // Build the banner message from whichever configured backends are down.
   // "unknown" = first poll not yet back — don't show a false alarm banner.
+  // "unconfigured" = env var not set — not an error, don't warn about it.
   const openragDown   = health.openrag   === "down";
   const workbenchDown = health.workbench === "down";
 

@@ -8,16 +8,17 @@
 // after opening the app sees the banner clear within seconds of switching back).
 //
 // Returns { openrag, workbench } where each value is:
-//   'unknown'  — first fetch not yet complete (very brief, renders nothing)
-//   'up'       — last probe returned ok: true
-//   'down'     — last probe returned ok: false, or backend is not configured
+//   'unknown'       — first fetch not yet complete (very brief, renders nothing)
+//   'up'            — last probe returned ok: true
+//   'down'          — configured but unreachable (probe failed or timed out)
+//   'unconfigured'  — env var is absent/empty; backend is intentionally absent
 // ============================================================================
 
 "use client";
 
 import { useEffect, useState } from "react";
 
-export type BackendStatus = "unknown" | "up" | "down";
+export type BackendStatus = "unknown" | "up" | "down" | "unconfigured";
 
 export interface BackendHealth {
   openrag:   BackendStatus;
@@ -41,8 +42,8 @@ export function useBackendHealth(): BackendHealth {
           workbench: { ok: boolean } | null;
         };
         setHealth({
-          openrag:   data.openrag   == null ? "down" : data.openrag.ok   ? "up" : "down",
-          workbench: data.workbench == null ? "down" : data.workbench.ok ? "up" : "down",
+          openrag:   data.openrag   == null ? "unconfigured" : data.openrag.ok   ? "up" : "down",
+          workbench: data.workbench == null ? "unconfigured" : data.workbench.ok ? "up" : "down",
         });
       } catch {
         // Network error — treat both as down until the next poll succeeds.

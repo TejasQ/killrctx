@@ -29,9 +29,20 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
   // id of the notebook currently being renamed, or null if none
   const [renamingId, setRenamingId] = useState<string | null>(null);
-  // Backend selection for new notebook creation
+  // Backend selection for new notebook creation.
+  // We start with "openrag" as a safe default, but useEffect below will switch
+  // to "workbench" if OpenRAG turns out to be unconfigured and Workbench is not.
   const [ragBackend, setRagBackend] = useState<"openrag" | "workbench">("openrag");
   const health = useBackendHealth();
+
+  // Once the first health poll completes, auto-select the only configured backend
+  // so the user never lands on a picker option that can't work.
+  useEffect(() => {
+    if (health.openrag === "unknown" || health.workbench === "unknown") return;
+    if (health.openrag === "unconfigured" && health.workbench !== "unconfigured") {
+      setRagBackend("workbench");
+    }
+  }, [health.openrag, health.workbench]);
 
   // Fetch the list on mount. We do an optimistic prepend on create (below)
   // so we don't need to refetch after — but if you ever add deletion or
@@ -247,12 +258,14 @@ function RenameInput({
 // ============================================================================
 // BackendPicker — logo-labelled toggle buttons for choosing the RAG backend
 // ============================================================================
-// Two side-by-side buttons, each showing the platform logo + name. The active
-// choice gets an accent border; the inactive one stays subdued. Buttons for
-// offline/unconfigured backends are disabled and show "(offline)" instead of
-// the URL so the user isn't left guessing why they can't select them.
+// Only renders buttons for backends that are configured (env var set). An
+// unconfigured backend is intentionally absent — we don't even show it.
+// A configured-but-offline backend is shown disabled so the user can see
+// something is wrong without being misled about availability.
+// If only one backend is configured the picker renders a single static button
+// (no toggle needed).
 // ============================================================================
-const BACKEND_OPTIONS = [
+const ALL_BACKEND_OPTIONS = [
   { value: "openrag",   label: "OpenRAG",     logo: "/assets/logo-openrag-dog.svg" },
   { value: "workbench", label: "AI Workbench", logo: "/assets/logo-astra.png" },
 ] as const;
@@ -268,18 +281,28 @@ function BackendPicker({
   onChange: (v: "openrag" | "workbench") => void;
   health: BackendHealth;
 }) {
+  // Hide any backend the user hasn't configured. "unknown" passes through so
+  // we don't flash an empty picker on first paint before the poll returns.
+  const options = ALL_BACKEND_OPTIONS.filter(
+    (opt) => health[opt.value] !== "unconfigured"
+  );
+
+  // Nothing configured yet (still loading) — render nothing.
+  if (options.length === 0) return null;
+
   return (
     <div className="flex rounded-lg border border-edge overflow-hidden">
-      {BACKEND_OPTIONS.map((opt) => {
-        const active  = value === opt.value;
-        // "unknown" = first poll not yet back — don't disable on first paint.
-        const offline = health[opt.value] === "down";
+      {options.map((opt) => {
+        const active   = value === opt.value;
+        const offline  = health[opt.value] === "down";
+        // A single configured backend needs no toggle — render it as a static label.
+        const clickable = options.length > 1 && !offline;
         return (
           <button
             key={opt.value}
             type="button"
-            onClick={() => !offline && onChange(opt.value)}
-            disabled={offline}
+            onClick={() => clickable && onChange(opt.value)}
+            disabled={offline || options.length === 1}
             className={[
               "flex items-center gap-1.5 px-2.5 py-2 text-xs transition",
               offline
@@ -316,7 +339,10 @@ function BackendLogo({ backend, health }: { backend?: string; health: BackendHea
   const key    = backend === "workbench" ? "workbench" : "openrag";
   const status = health[key];
 
-  const dot = status === "unknown" ? null : (
+  // No dot when health is still loading, or when the backend isn't configured
+  // (unconfigured notebooks belong to a setup that no longer exists — no point
+  // marking them red; they just silently have no live backend).
+  const dot = (status === "unknown" || status === "unconfigured") ? null : (
     <span
       aria-label={status === "up" ? "online" : "offline"}
       className={[

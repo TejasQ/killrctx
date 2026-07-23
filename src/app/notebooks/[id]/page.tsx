@@ -176,6 +176,15 @@ export default function NotebookPage({
     setNotes(data.notes);
     setMindMapLinks(data.mindMapLinks ?? []);
 
+    // For OpenRAG notebooks, fetch the current model settings once on first
+    // load so the model picker labels are visible without needing a save first.
+    if (data.notebook?.rag_backend !== "workbench") {
+      fetch("/api/openrag-settings")
+        .then((r) => r.ok ? r.json() : null)
+        .then((s) => { if (s?.llm) setOpenragSettings(s); })
+        .catch(() => {});
+    }
+
     // For Workbench notebooks, fetch agent and embedding-service names once so
     // the pickers can show "llama-3-70b" instead of "e5a643ad-8fae-…".
     if (data.notebook?.rag_backend === "workbench") {

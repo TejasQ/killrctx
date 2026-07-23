@@ -21,7 +21,12 @@ import Spinner from "@/components/Spinner";
 import MenuButton from "@/components/MenuButton";
 import { useBackendHealth } from "@/hooks/useBackendHealth";
 
-type Notebook = { id: string; title: string; created_at: number; rag_backend?: string };
+type Notebook = { id: string; title: string; created_at: number; rag_backend?: string; openrag_filter_id?: string | null };
+
+// A filter that exists in OpenRAG but has no local notebook yet.
+type UnlinkedFilter = { id: string; name: string; docCount: number };
+
+const DISMISSED_KEY = "killrctx_dismissed_filter_ids";
 
 export default function Home() {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -34,6 +39,13 @@ export default function Home() {
   // to "workbench" if OpenRAG turns out to be unconfigured and Workbench is not.
   const [ragBackend, setRagBackend] = useState<"openrag" | "workbench">("openrag");
   const health = useBackendHealth();
+
+  // Filters that exist in OpenRAG but have no local notebook.
+  const [unlinkedFilters, setUnlinkedFilters] = useState<UnlinkedFilter[]>([]);
+  // Filter IDs the user dismissed — persisted in localStorage.
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  // Which filter import is in flight (null = none).
+  const [importing, setImporting] = useState<string | null>(null);
 
   // Once the first health poll completes, auto-select the only configured backend
   // so the user never lands on a picker option that can't work.
@@ -53,6 +65,62 @@ export default function Home() {
     setNotebooks(data.notebooks);
   }
   useEffect(() => { load(); }, []);
+
+  // Fetch unlinked filters once OpenRAG is confirmed up.
+  // Re-runs whenever health.openrag changes (e.g. after a cold start).
+  useEffect(() => {
+    if (health.openrag !== "up") return;
+    const stored = localStorage.getItem(DISMISSED_KEY);
+    const dismissed = new Set<string>(stored ? JSON.parse(stored) : []);
+    setDismissedIds(dismissed);
+    fetch("/api/openrag-filters/unlinked")
+      .then((r) => r.json())
+      .then((data: { filters: { id: string; name: string; queryData: { filters?: { data_sources?: string[] } } }[] }) => {
+        const active = data.filters
+          .filter((f) => !dismissed.has(f.id))
+          .map((f) => ({
+            id: f.id,
+            name: f.name,
+            docCount: (f.queryData?.filters?.data_sources ?? []).filter((s) => s !== "*").length,
+          }));
+        setUnlinkedFilters(active);
+      })
+      .catch(() => { /* OpenRAG down — no banner */ });
+  }, [health.openrag]);
+
+  async function reimportFilter(nb: Notebook) {
+    if (!nb.openrag_filter_id) return;
+    await fetch("/api/openrag-filters/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filterId: nb.openrag_filter_id }),
+    });
+    // Reload the full list so the Sources panel on next open reflects new docs.
+    await load();
+  }
+
+  async function importFilter(filterId: string) {
+    setImporting(filterId);
+    try {
+      const res = await fetch("/api/openrag-filters/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filterId }),
+      });
+      const { notebook } = await res.json();
+      setNotebooks((n) => [notebook, ...n]);
+      setUnlinkedFilters((f) => f.filter((x) => x.id !== filterId));
+    } finally {
+      setImporting(null);
+    }
+  }
+
+  function dismissFilter(filterId: string) {
+    const next = new Set(dismissedIds).add(filterId);
+    setDismissedIds(next);
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify([...next]));
+    setUnlinkedFilters((f) => f.filter((x) => x.id !== filterId));
+  }
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -142,6 +210,13 @@ export default function Home() {
         )}
       </form>
 
+      <UnlinkedFilterBanner
+        filters={unlinkedFilters}
+        importing={importing}
+        onImport={importFilter}
+        onDismiss={dismissFilter}
+      />
+
       <ul className="grid gap-3">
         {notebooks.map((nb) => (
           <li
@@ -192,9 +267,17 @@ export default function Home() {
                           label: "Rename",
                           onClick: () => setRenamingId(nb.id),
                         },
+                    // Reimport is only meaningful for OpenRAG notebooks that have
+                    // a linked filter — it pulls in any new data_sources filenames.
+                    ...(nb.rag_backend !== "workbench" && nb.openrag_filter_id
+                      ? [{
+                          label: "Reimport sources",
+                          onClick: () => reimportFilter(nb),
+                        }]
+                      : []),
                     {
                       label: "Delete notebook",
-                      variant: "danger",
+                      variant: "danger" as const,
                       onClick: () => remove(nb),
                     },
                   ]}
@@ -210,6 +293,66 @@ export default function Home() {
         )}
       </ul>
     </main>
+  );
+}
+
+// ============================================================================
+// UnlinkedFilterBanner — amber strip listing filters with no local notebook
+// ============================================================================
+// Rendered between the create form and the notebook list. Each row shows the
+// filter name, how many source files it has, and Import / Dismiss buttons.
+// Disappears automatically once all entries are imported or dismissed.
+// ============================================================================
+function UnlinkedFilterBanner({
+  filters,
+  importing,
+  onImport,
+  onDismiss,
+}: {
+  filters: UnlinkedFilter[];
+  importing: string | null;
+  onImport: (id: string) => void;
+  onDismiss: (id: string) => void;
+}) {
+  if (filters.length === 0) return null;
+
+  return (
+    <div className="mb-6 rounded-lg border border-amber-600/50 bg-amber-950/40 px-4 py-3">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-400">
+        OpenRAG filters without a notebook
+      </p>
+      <ul className="space-y-2">
+        {filters.map((f) => (
+          <li key={f.id} className="flex items-center justify-between gap-3 text-sm">
+            <span className="text-amber-200/90">
+              <span className="font-medium">{f.name}</span>
+              {f.docCount > 0 && (
+                <span className="ml-1.5 text-xs text-amber-400/70">
+                  ({f.docCount} {f.docCount === 1 ? "source" : "sources"})
+                </span>
+              )}
+            </span>
+            <div className="flex shrink-0 gap-2">
+              <button
+                onClick={() => onImport(f.id)}
+                disabled={importing === f.id}
+                className="flex items-center gap-1.5 rounded border border-amber-600/50 bg-amber-900/50 px-2.5 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-800/60 disabled:opacity-50"
+              >
+                {importing === f.id && <Spinner size="sm" />}
+                {importing === f.id ? "Importing…" : "Import"}
+              </button>
+              <button
+                onClick={() => onDismiss(f.id)}
+                disabled={importing === f.id}
+                className="rounded border border-white/10 px-2.5 py-1 text-xs text-muted transition hover:text-white disabled:opacity-50"
+              >
+                Dismiss
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

@@ -51,7 +51,7 @@
 // edits are picked up on the next request without restarting `next dev`.
 // ============================================================================
 
-import { OpenRAGClient, type IngestResponse, type StreamEvent } from "openrag-sdk";
+import { OpenRAGClient, type IngestResponse, type StreamEvent, type KnowledgeFilterQueryData } from "openrag-sdk";
 
 // ============================================================================
 // Debounced filter sync — prevents race conditions on concurrent uploads.
@@ -380,6 +380,17 @@ export async function syncFilterSources(filterId: string, filenames: string[]): 
       },
     },
   });
+}
+
+/**
+ * List all knowledge filters in OpenRAG.
+ *
+ * Used by the import flow to find filters that have no corresponding local
+ * notebook. The SDK's `search()` with no query returns all filters (up to
+ * the default limit of 20).
+ */
+export async function listFilters(): Promise<{ id: string; name: string; queryData: KnowledgeFilterQueryData }[]> {
+  return getClient().knowledgeFilters.search();
 }
 
 /**

@@ -361,6 +361,13 @@ function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_mind_map_links_conv ON mind_map_links(conversation_id);
   `);
 
+  // Ensure (notebook_id, filename) is unique in documents so INSERT OR IGNORE
+  // correctly deduplicates reimport calls. IF NOT EXISTS makes this idempotent.
+  conn.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_notebook_filename
+      ON documents(notebook_id, filename)
+  `);
+
   // Add node_path column to mind_map_links if it doesn't exist yet.
   // Existing rows get '' (empty string) which is the correct value for links
   // created before we started tracking ancestor paths.

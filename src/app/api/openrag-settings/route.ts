@@ -1,17 +1,27 @@
 // ============================================================================
-// /api/openrag-settings — update the active LLM or embedding model in OpenRAG
+// /api/openrag-settings — read or update the active LLM or embedding model
 // ============================================================================
 //
-// _Basically_, the ModelPickerPopover calls this whenever the user picks a
-// different model. We forward the selection to OpenRAG via the SDK, then
-// re-read the confirmed values and return them so the caller can update the
-// header label and Sources panel in one round-trip.
+// _Basically_, the ModelPickerPopover calls PATCH here whenever the user picks
+// a different model. GET is called on notebook page load so the model picker
+// labels show the current model instead of staying hidden until after a save.
 // ============================================================================
 
 import { NextResponse } from "next/server";
-import { updateSettings } from "@/lib/openrag";
+import { probeSettings, updateSettings } from "@/lib/openrag";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  try {
+    const settings = await probeSettings();
+    return NextResponse.json(settings);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "failed to read settings";
+    return NextResponse.json({ error: msg }, { status: 502 });
+  }
+}
 
 export async function PATCH(req: Request) {
   const body = (await req.json().catch(() => null)) as {
